@@ -27,7 +27,9 @@ import java.awt.event.MouseEvent;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.channels.SeekableByteChannel;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -35,19 +37,31 @@ import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.time.LocalDateTime;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import javax.imageio.ImageIO;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.StringJoiner;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import javax.swing.BorderFactory;
 import javax.swing.AbstractButton;
 import javax.swing.JButton;
+import javax.swing.JComboBox;
 import javax.swing.JComponent;
 import javax.swing.JFrame;
 import javax.swing.ImageIcon;
@@ -60,6 +74,7 @@ import javax.swing.JPopupMenu;
 import javax.swing.JScrollBar;
 import javax.swing.JScrollPane;
 import javax.swing.JTextField;
+import javax.swing.JToggleButton;
 import javax.swing.Timer;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
@@ -69,6 +84,7 @@ import javax.swing.event.DocumentListener;
 import javax.swing.event.PopupMenuEvent;
 import javax.swing.event.PopupMenuListener;
 import javax.swing.plaf.basic.BasicScrollBarUI;
+import javax.swing.undo.UndoManager;
 
 public class TowHitchSystemPure {
     private static final String BUSINESS_NAME = "Tow Hitch by 5-21";
@@ -76,8 +92,13 @@ public class TowHitchSystemPure {
     private static final String PASSWORD = "1234";
     private static final Path DATA_FILE = Paths.get("inventory_data.txt");
     private static final Path HISTORY_FILE = Paths.get("history_logs.txt");
+    private static final Path PRODUCTION_LOG_FILE = Paths.get("production_logs.txt");
+    private static final Path MATERIAL_CONSUMPTION_FILE = Paths.get("material_consumption.txt");
+    private static final Path PRODUCT_ALIAS_FILE = Paths.get("product_aliases.txt");
     private static final DateTimeFormatter HISTORY_TIMESTAMP_FORMAT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
+    private static final DateTimeFormatter PRODUCTION_TIMESTAMP_FORMAT =
+            DateTimeFormatter.ISO_INSTANT;
     private static final int LOW_STOCK_THRESHOLD = 5;
     private static final int DASHBOARD_WARNING_THRESHOLD = 15;
     private static final Font BODY_FONT = new Font("SansSerif", Font.PLAIN, 14);
@@ -88,6 +109,27 @@ public class TowHitchSystemPure {
     private final Map<String, Integer> finishedGoods = new LinkedHashMap<>();
     private final Map<String, Integer> rawMaterials = new LinkedHashMap<>();
     private final Map<String, Integer> pendingStockUpdates = new LinkedHashMap<>();
+    private final List<MaterialDraft> pendingMaterialDrafts = new ArrayList<>();
+    private final Map<String, Integer> stagedMaterialAdditions = new LinkedHashMap<>();
+    private final Map<String, JTextField> materialNameEdits = new LinkedHashMap<>();
+    private final Set<String> selectedMaterialsForDeletion = new LinkedHashSet<>();
+    private final UndoManager stockTextUndoManager = new UndoManager();
+    private final List<Runnable> stockActionUndoHistory = new ArrayList<>();
+    private final Map<String, Integer> stagedProductAdditions = new LinkedHashMap<>();
+    private final Map<String, JTextField> productNameEdits = new LinkedHashMap<>();
+    private final Set<String> selectedProductsForDeletion = new LinkedHashSet<>();
+    private final UndoManager productTextUndoManager = new UndoManager();
+    private final Map<String, Integer> productionOpeningBalances = new LinkedHashMap<>();
+    private final Map<String, Long> lifetimeProductionUnits = new LinkedHashMap<>();
+    private final Map<String, Integer> activeProductionUnits = new LinkedHashMap<>();
+    private final List<ProductionBatch> activeProductionBatches = new ArrayList<>();
+    private final ScheduledExecutorService productionBackend =
+            Executors.newSingleThreadScheduledExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "production-history-worker");
+                thread.setDaemon(true);
+                return thread;
+            });
+    private ScheduledFuture<?> productionExpiryTask;
     private final Map<String, List<BOMItem>> billOfMaterials = new LinkedHashMap<>();
     private final ThemeController theme = new ThemeController();
     private final ImageIcon lightWallpaper;
@@ -120,6 +162,16 @@ public class TowHitchSystemPure {
     private Boolean settingsOpenAtButtonPress;
     private JLabel settingsStatus;
     private JLabel stockSaveStatus;
+    private JButton stockUndoButton;
+    private JLabel productSaveStatus;
+    private JButton productUndoButton;
+    private StockFooterMode stockFooterMode = StockFooterMode.NORMAL;
+    private ProductCatalogMode productCatalogMode = ProductCatalogMode.NORMAL;
+    private ProductDraft pendingProductDraft;
+    private boolean stockFooterSaveInProgress;
+    private boolean productionHistoryLoaded;
+    private boolean productionTransactionInProgress;
+    private boolean productAliasUpdateInProgress;
     private RoundedPanel searchHighlightComponent;
     private String searchHighlightName = "";
     private Timer searchFlashTimer;
@@ -135,7 +187,7 @@ public class TowHitchSystemPure {
     private boolean sidebarExpanded = true;
     private int sidebarWidth = 220;
     private Timer sidebarAnimation;
-    private final Map<String, Boolean> expandedBOMCards = new LinkedHashMap<>();
+    private final Map<String, Boolean> productExpansionMap = new LinkedHashMap<>();
 
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> new TowHitchSystemPure().start());
@@ -257,6 +309,8 @@ public class TowHitchSystemPure {
                     "Unable to initialize production history:\n" + e.getMessage(),
                     "History Initialization Error", JOptionPane.ERROR_MESSAGE);
         }
+        Map<String, Integer> inventoryAtStartup = new LinkedHashMap<>(finishedGoods);
+        productionBackend.execute(() -> loadProductionLedger(inventoryAtStartup));
 
         showLogin();
         frame.setVisible(true);
@@ -711,15 +765,8 @@ public class TowHitchSystemPure {
 
         JPanel summaryCards = new JPanel(new GridLayout(1, 2, 16, 0));
         summaryCards.setOpaque(false);
-        String finishedUnitCount;
-        try {
-            finishedUnitCount = String.valueOf(getFinishedUnitCount());
-        } catch (IOException e) {
-            finishedUnitCount = "Unavailable";
-            JOptionPane.showMessageDialog(frame,
-                    "Unable to calculate finished units from production history:\n" + e.getMessage(),
-                    "Finished Units Error", JOptionPane.ERROR_MESSAGE);
-        }
+        String finishedUnitCount = productionHistoryLoaded
+                ? String.valueOf(getFinishedUnitCount()) : "Loading";
         summaryCards.add(buildSummaryCard("Finished Units", finishedUnitCount,
                 "Produced in the last 72 hours"));
         summaryCards.add(buildSummaryCard("Low Stocks", String.valueOf(getLowStockMaterials().size()),
@@ -808,12 +855,49 @@ public class TowHitchSystemPure {
         stockSaveStatus.setFont(SMALL_FONT);
         stockSaveStatus.setForeground(theme.success());
         saveControls.add(stockSaveStatus, BorderLayout.CENTER);
-        RoundedButton saveButton = new RoundedButton(
-                "Save", new Color(0x23211F), Color.WHITE);
+        Color saveFill = stockFooterMode == StockFooterMode.DELETE
+                ? theme.danger() : new Color(0x23211F);
+        String saveLabel = stockFooterMode == StockFooterMode.ADD ? "Add"
+                : stockFooterMode == StockFooterMode.DELETE ? "Delete" : "Save";
+        RoundedButton saveButton = new RoundedButton(saveLabel, saveFill, Color.WHITE);
         saveButton.setFont(new Font("SansSerif", Font.BOLD, 14));
         saveButton.setPreferredSize(new Dimension(120, 44));
         saveButton.addActionListener(event -> {
-            if (commitPendingStockUpdates()) {
+            if (stockFooterMode == StockFooterMode.DELETE) {
+                int choice = showThemedChoiceDialog("Confirm Deletion",
+                        "Are you sure you want to delete the selected items?",
+                        "Yes", "No");
+                if (choice != 0) {
+                    return;
+                }
+            }
+            if (stockFooterMode == StockFooterMode.ADD) {
+                if (stageActiveMaterialAddition()) {
+                    showPage("Stocks");
+                    stockSaveStatus.setForeground(theme.secondaryText());
+                    stockSaveStatus.setText(
+                            "Material staged. Select Save to commit changes.");
+                }
+                return;
+            }
+            if (stockFooterMode == StockFooterMode.NORMAL
+                    && pendingStockUpdates.isEmpty()
+                    && stagedMaterialAdditions.isEmpty()
+                    && pendingMaterialDrafts.isEmpty()
+                    && materialNameEdits.isEmpty()
+                    && selectedMaterialsForDeletion.isEmpty()) {
+                stockSaveStatus.setForeground(theme.success());
+                stockSaveStatus.setText("Changes saved successfully!");
+                return;
+            }
+            stockFooterSaveInProgress = true;
+            boolean saved;
+            try {
+                saved = commitPendingStockUpdates();
+            } finally {
+                stockFooterSaveInProgress = false;
+            }
+            if (saved) {
                 stockSaveStatus.setForeground(theme.success());
                 stockSaveStatus.setText("Changes saved successfully!");
             } else {
@@ -821,8 +905,34 @@ public class TowHitchSystemPure {
                 stockSaveStatus.setText("Unable to save changes. See the error message.");
             }
         });
-        JPanel saveButtonHolder = new JPanel(new FlowLayout(FlowLayout.RIGHT, 0, 0));
+        JPanel saveButtonHolder = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         saveButtonHolder.setOpaque(false);
+        RoundedButton editButton = new RoundedButton(
+                stockFooterMode == StockFooterMode.NORMAL ? "Edit" : "Cancel",
+                theme.input(), theme.text(), 10);
+        editButton.setFont(new Font("SansSerif", Font.BOLD, 14));
+        editButton.setPreferredSize(new Dimension(100, 44));
+        editButton.addActionListener(event -> {
+            if (stockFooterMode == StockFooterMode.NORMAL) {
+                enterStockToolbarMode();
+            } else {
+                cancelStockFooterMode();
+            }
+        });
+        if (stockFooterMode != StockFooterMode.NORMAL) {
+            RoundedButton undoButton = new RoundedButton(
+                    "Undo", theme.input(), theme.text(), 10);
+            undoButton.setFont(new Font("SansSerif", Font.BOLD, 14));
+            undoButton.setPreferredSize(new Dimension(92, 44));
+            undoButton.setEnabled(stockTextUndoManager.canUndo()
+                    || !stockActionUndoHistory.isEmpty());
+            undoButton.addActionListener(event -> undoStockAction());
+            stockUndoButton = undoButton;
+            saveButtonHolder.add(undoButton);
+        } else {
+            stockUndoButton = null;
+        }
+        saveButtonHolder.add(editButton);
         saveButtonHolder.add(saveButton);
         saveControls.add(saveButtonHolder, BorderLayout.EAST);
         inventoryPanel.add(saveControls, BorderLayout.SOUTH);
@@ -837,10 +947,26 @@ public class TowHitchSystemPure {
         rows.add(inventoryColumnHeader());
         rows.add(javax.swing.Box.createVerticalStrut(8));
         int visibleRows = 0;
-        List<String> itemNames = new ArrayList<>(inventory.keySet());
+        for (MaterialDraft draft : pendingMaterialDrafts) {
+            rows.add(materialDraftRow(draft));
+            rows.add(javax.swing.Box.createVerticalStrut(8));
+            visibleRows++;
+        }
+        Map<String, Integer> visibleInventory = new LinkedHashMap<>(inventory);
+        visibleInventory.putAll(stagedMaterialAdditions);
+        List<String> itemNames = new ArrayList<>(visibleInventory.keySet());
         itemNames.sort(String.CASE_INSENSITIVE_ORDER);
         for (String itemName : itemNames) {
-            rows.add(inventoryRow(itemName, inventory));
+            rows.add(inventoryRow(itemName, visibleInventory,
+                    stockFooterMode == StockFooterMode.DELETE));
+            JPanel separator = new JPanel();
+            separator.setOpaque(true);
+            Color separatorColor = theme.secondaryText();
+            separator.setBackground(new Color(separatorColor.getRed(), separatorColor.getGreen(),
+                    separatorColor.getBlue(), 55));
+            separator.setMaximumSize(new Dimension(Integer.MAX_VALUE, 1));
+            separator.setPreferredSize(new Dimension(1, 1));
+            rows.add(separator);
             rows.add(javax.swing.Box.createVerticalStrut(8));
             visibleRows++;
         }
@@ -862,7 +988,6 @@ public class TowHitchSystemPure {
 
         JPanel quantityColumns = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         quantityColumns.setOpaque(false);
-        quantityColumns.add(javax.swing.Box.createHorizontalStrut(36));
 
         JLabel quantity = new JLabel("Qty", SwingConstants.CENTER);
         quantity.setFont(new Font("SansSerif", Font.BOLD, 13));
@@ -870,23 +995,61 @@ public class TowHitchSystemPure {
         int quantityWidth = new JTextField("", 5).getPreferredSize().width;
         quantity.setPreferredSize(new Dimension(quantityWidth, quantity.getPreferredSize().height));
         quantityColumns.add(quantity);
-        quantityColumns.add(javax.swing.Box.createHorizontalStrut(36));
-        header.add(quantityColumns, BorderLayout.EAST);
+        JPanel headerActions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
+        headerActions.setOpaque(false);
+        if (stockFooterMode != StockFooterMode.NORMAL) {
+            StockActionIconButton editAction =
+                    new StockActionIconButton(StockHeaderAction.EDIT);
+            editAction.addActionListener(event -> beginMaterialNameEdit());
+            StockActionIconButton addAction =
+                    new StockActionIconButton(StockHeaderAction.ADD);
+            addAction.addActionListener(event -> beginMaterialAddition());
+            StockActionIconButton deleteAction =
+                    new StockActionIconButton(StockHeaderAction.DELETE);
+            deleteAction.addActionListener(event -> beginMaterialDeletion());
+            headerActions.add(editAction);
+            headerActions.add(addAction);
+            headerActions.add(deleteAction);
+        }
+        JPanel headerRight = new JPanel(new BorderLayout(0, 2));
+        headerRight.setOpaque(false);
+        if (stockFooterMode != StockFooterMode.NORMAL) {
+            headerRight.add(headerActions, BorderLayout.NORTH);
+        }
+        headerRight.add(quantityColumns, BorderLayout.SOUTH);
+        header.add(headerRight, BorderLayout.EAST);
         return header;
     }
 
-    private JPanel inventoryRow(String itemName, Map<String, Integer> inventory) {
+    private JPanel inventoryRow(String itemName, Map<String, Integer> inventory,
+            boolean showSelection) {
         RoundedPanel row = new RoundedPanel(14);
         row.setBackground(theme.row());
         if (itemName.equalsIgnoreCase(searchHighlightName)) {
             searchHighlightComponent = row;
         }
         row.setLayout(new BorderLayout(12, 0));
-        row.setBorder(BorderFactory.createEmptyBorder(12, 15, 12, 12));
+        row.setBorder(BorderFactory.createEmptyBorder(12, showSelection ? 10 : 15, 12, 12));
 
-        JLabel name = new JLabel(itemName);
-        name.setFont(new Font("SansSerif", Font.BOLD, 14));
-        name.setForeground(theme.text());
+        JComponent nameDisplay;
+        if (stockFooterMode == StockFooterMode.EDIT_NAMES) {
+            JTextField nameField = materialNameEdits.get(itemName);
+            if (nameField != null) {
+                nameField.setFont(new Font("SansSerif", Font.BOLD, 14));
+                nameField.setForeground(theme.text());
+                nameField.setCaretColor(theme.text());
+                nameField.setOpaque(false);
+                nameField.setBorder(null);
+                nameField.setMargin(new Insets(0, 8, 0, 8));
+                nameField.setPreferredSize(new Dimension(220, 28));
+                nameField.setToolTipText("Edit material name");
+                nameDisplay = nameField;
+            } else {
+                nameDisplay = materialNameLabel(itemName);
+            }
+        } else {
+            nameDisplay = materialNameLabel(itemName);
+        }
         JTextField quantity = new JTextField(String.valueOf(getStockQuantity(itemName)), 5);
         quantity.setHorizontalAlignment(SwingConstants.CENTER);
         quantity.setFont(new Font("SansSerif", Font.BOLD, 15));
@@ -896,7 +1059,6 @@ public class TowHitchSystemPure {
         quantity.setBorder(BorderFactory.createCompoundBorder(
                 BorderFactory.createLineBorder(theme.row(), 1, true),
                 BorderFactory.createEmptyBorder(5, 8, 5, 8)));
-        quantity.setToolTipText("Click to enter an exact stock quantity");
         quantity.addActionListener(event -> quantity.transferFocus());
         quantity.addFocusListener(new FocusAdapter() {
             @Override
@@ -911,7 +1073,7 @@ public class TowHitchSystemPure {
         });
         JPanel itemLabels = new JPanel(new BorderLayout(0, 4));
         itemLabels.setOpaque(false);
-        itemLabels.add(name, BorderLayout.NORTH);
+        itemLabels.add(nameDisplay, BorderLayout.NORTH);
         JLabel stockStatus = new JLabel();
         stockStatus.setFont(SMALL_FONT);
         updateStockStatus(itemName, stockStatus);
@@ -920,8 +1082,10 @@ public class TowHitchSystemPure {
 
         JPanel controls = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         controls.setOpaque(false);
-        RoundedButton minus = secondaryButton("-");
-        RoundedButton plus = secondaryButton("+");
+        RoundedButton minus = new RoundedButton("-", theme.input(), theme.text(), 8);
+        RoundedButton plus = new RoundedButton("+", theme.input(), theme.text(), 8);
+        minus.setFont(new Font("SansSerif", Font.BOLD, 14));
+        plus.setFont(new Font("SansSerif", Font.BOLD, 14));
         minus.setPreferredSize(new Dimension(36, 36));
         plus.setPreferredSize(new Dimension(36, 36));
         installStockHoldBehavior(minus, itemName, inventory, -1, quantity, stockStatus);
@@ -930,7 +1094,138 @@ public class TowHitchSystemPure {
         controls.add(quantity);
         controls.add(plus);
         row.add(controls, BorderLayout.EAST);
+        if (showSelection) {
+            SelectionCircleButton select = new SelectionCircleButton();
+            select.setSelected(selectedMaterialsForDeletion.contains(itemName));
+            select.setToolTipText("Mark " + itemName + " for deletion");
+            select.addActionListener(event -> {
+                boolean wasSelected = !select.isSelected();
+                pushStockActionUndo(() -> {
+                    if (wasSelected) {
+                        selectedMaterialsForDeletion.add(itemName);
+                    } else {
+                        selectedMaterialsForDeletion.remove(itemName);
+                    }
+                    showPage("Stocks");
+                });
+                if (select.isSelected()) {
+                    selectedMaterialsForDeletion.add(itemName);
+                } else {
+                    selectedMaterialsForDeletion.remove(itemName);
+                }
+            });
+            row.add(select, BorderLayout.WEST);
+        }
         return row;
+    }
+
+    private JLabel materialNameLabel(String itemName) {
+        JLabel name = new JLabel(itemName);
+        name.setFont(new Font("SansSerif", Font.BOLD, 14));
+        name.setForeground(theme.text());
+        return name;
+    }
+
+    private JPanel materialDraftRow(MaterialDraft draft) {
+        RoundedPanel row = new RoundedPanel(14);
+        row.setBackground(theme.row());
+        row.setLayout(new BorderLayout(12, 0));
+        row.setBorder(BorderFactory.createEmptyBorder(10, 15, 10, 12));
+
+        draft.nameField.setFont(new Font("SansSerif", Font.BOLD, 14));
+        draft.nameField.setForeground(theme.text());
+        draft.nameField.setCaretColor(theme.text());
+        draft.nameField.setOpaque(false);
+        draft.nameField.setBorder(null);
+        draft.nameField.setMargin(new Insets(0, 8, 0, 8));
+        draft.nameField.setPreferredSize(new Dimension(220, 28));
+        draft.nameField.setToolTipText("Enter the new material name");
+
+        draft.quantityField.setHorizontalAlignment(SwingConstants.CENTER);
+        draft.quantityField.setFont(new Font("SansSerif", Font.BOLD, 15));
+        draft.quantityField.setForeground(theme.text());
+        draft.quantityField.setCaretColor(theme.text());
+        draft.quantityField.setOpaque(false);
+        draft.quantityField.setBorder(null);
+
+        JLabel stockStatus = new JLabel("New material");
+        stockStatus.setFont(SMALL_FONT);
+        stockStatus.setForeground(theme.secondaryText());
+        JPanel itemLabels = new JPanel(new BorderLayout(0, 4));
+        itemLabels.setOpaque(false);
+        itemLabels.add(draft.nameField, BorderLayout.NORTH);
+        itemLabels.add(stockStatus, BorderLayout.SOUTH);
+        row.add(itemLabels, BorderLayout.CENTER);
+
+        JPanel quantityHolder = new JPanel();
+        quantityHolder.setOpaque(false);
+        quantityHolder.setLayout(new javax.swing.BoxLayout(quantityHolder, javax.swing.BoxLayout.X_AXIS));
+        RoundedButton minus = secondaryButton("-");
+        RoundedButton plus = secondaryButton("+");
+        minus.setPreferredSize(new Dimension(36, 36));
+        minus.setMinimumSize(new Dimension(36, 36));
+        minus.setMaximumSize(new Dimension(36, 36));
+        plus.setPreferredSize(new Dimension(36, 36));
+        plus.setMinimumSize(new Dimension(36, 36));
+        plus.setMaximumSize(new Dimension(36, 36));
+        draft.quantityField.setPreferredSize(new Dimension(54, 36));
+        draft.quantityField.setMinimumSize(new Dimension(54, 36));
+        draft.quantityField.setMaximumSize(new Dimension(54, 36));
+        quantityHolder.add(javax.swing.Box.createHorizontalStrut(8));
+        installDraftHoldBehavior(minus, draft, -1);
+        installDraftHoldBehavior(plus, draft, 1);
+        quantityHolder.add(minus);
+        quantityHolder.add(javax.swing.Box.createHorizontalStrut(6));
+        quantityHolder.add(draft.quantityField);
+        quantityHolder.add(javax.swing.Box.createHorizontalStrut(6));
+        quantityHolder.add(plus);
+        quantityHolder.add(javax.swing.Box.createHorizontalStrut(8));
+        row.add(quantityHolder, BorderLayout.EAST);
+        return row;
+    }
+
+    private void installDraftHoldBehavior(RoundedButton button, MaterialDraft draft, int delta) {
+        final boolean[] pressed = {false};
+        Timer repeatTimer = new Timer(75, event -> adjustDraftQuantity(draft, delta));
+        repeatTimer.setInitialDelay(400);
+        button.addActionListener(event -> {
+            if (!pressed[0]) {
+                adjustDraftQuantity(draft, delta);
+            }
+        });
+        button.addMouseListener(new MouseAdapter() {
+            @Override
+            public void mousePressed(MouseEvent event) {
+                pressed[0] = true;
+                adjustDraftQuantity(draft, delta);
+                repeatTimer.restart();
+            }
+
+            @Override
+            public void mouseReleased(MouseEvent event) {
+                repeatTimer.stop();
+                SwingUtilities.invokeLater(() -> pressed[0] = false);
+            }
+
+            @Override
+            public void mouseExited(MouseEvent event) {
+                repeatTimer.stop();
+            }
+        });
+    }
+
+    private void adjustDraftQuantity(MaterialDraft draft, int delta) {
+        int current;
+        try {
+            current = Integer.parseInt(draft.quantityField.getText().trim());
+        } catch (NumberFormatException e) {
+            current = 0;
+        }
+        long updated = (long) current + delta;
+        if (updated < 0 || updated > Integer.MAX_VALUE) {
+            return;
+        }
+        draft.quantityField.setText(String.valueOf(updated));
     }
 
     private JPanel buildProductionPage() {
@@ -938,8 +1233,13 @@ public class TowHitchSystemPure {
         JPanel cards = new JPanel(new GridBagLayout());
         cards.setOpaque(false);
         List<String> products = new ArrayList<>(finishedGoods.keySet());
+        for (String product : stagedProductAdditions.keySet()) {
+            if (!products.contains(product)) {
+                products.add(product);
+            }
+        }
         products.sort(String.CASE_INSENSITIVE_ORDER);
-        if (products.isEmpty()) {
+        if (products.isEmpty() && pendingProductDraft == null) {
             GridBagConstraints emptyConstraints = new GridBagConstraints();
             emptyConstraints.gridx = 0;
             emptyConstraints.gridy = 0;
@@ -949,11 +1249,18 @@ public class TowHitchSystemPure {
             cards.add(emptyState("No products match your search."), emptyConstraints);
         } else {
             JPanel[] columns = {productionCardColumn(), productionCardColumn()};
-            for (int index = 0; index < products.size(); index++) {
-                JPanel column = columns[index % columns.length];
-                JPanel card = buildProductionCard(products.get(index));
+            int cardIndex = 0;
+            if (pendingProductDraft != null) {
+                columns[0].add(buildProductDraftCard());
+                columns[0].add(javax.swing.Box.createVerticalStrut(14));
+                cardIndex = 1;
+            }
+            for (String product : products) {
+                JPanel column = columns[cardIndex % columns.length];
+                JPanel card = buildProductionCard(product);
                 column.add(card);
                 column.add(javax.swing.Box.createVerticalStrut(14));
+                cardIndex++;
             }
             for (int columnIndex = 0; columnIndex < columns.length; columnIndex++) {
                 GridBagConstraints columnConstraints = new GridBagConstraints();
@@ -969,8 +1276,81 @@ public class TowHitchSystemPure {
                 cards.add(columns[columnIndex], columnConstraints);
             }
         }
-        JScrollPane scroll = createScrollPane(cards);
-        page.add(scroll, BorderLayout.CENTER);
+        RoundedPanel catalog = new RoundedPanel(22);
+        catalog.setBackground(theme.panel());
+        catalog.setLayout(new BorderLayout(0, 12));
+        catalog.setBorder(BorderFactory.createEmptyBorder(15, 17, 15, 17));
+        JPanel catalogHeader = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
+        catalogHeader.setOpaque(false);
+        if (productCatalogMode != ProductCatalogMode.NORMAL) {
+            StockActionIconButton editAction =
+                    new StockActionIconButton(StockHeaderAction.EDIT);
+            editAction.setEnabled(!productionTransactionInProgress);
+            editAction.addActionListener(event -> beginProductNameEdit());
+            StockActionIconButton addAction =
+                    new StockActionIconButton(StockHeaderAction.ADD);
+            addAction.setEnabled(!productionTransactionInProgress);
+            addAction.addActionListener(event -> beginProductAddition());
+            StockActionIconButton deleteAction =
+                    new StockActionIconButton(StockHeaderAction.DELETE);
+            deleteAction.setEnabled(!productionTransactionInProgress);
+            deleteAction.addActionListener(event -> beginProductDeletion());
+            catalogHeader.add(editAction);
+            catalogHeader.add(addAction);
+            catalogHeader.add(deleteAction);
+        }
+        catalog.add(catalogHeader, BorderLayout.NORTH);
+        catalog.add(createScrollPane(cards), BorderLayout.CENTER);
+        JPanel footer = new JPanel(new BorderLayout(12, 0));
+        footer.setOpaque(false);
+        productSaveStatus = new JLabel(" ");
+        productSaveStatus.setFont(SMALL_FONT);
+        productSaveStatus.setForeground(theme.secondaryText());
+        footer.add(productSaveStatus, BorderLayout.CENTER);
+
+        JPanel footerButtons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        footerButtons.setOpaque(false);
+        if (productCatalogMode == ProductCatalogMode.NORMAL) {
+            RoundedButton editButton = new RoundedButton("Edit", theme.input(), theme.text(), 10);
+            editButton.setFont(new Font("SansSerif", Font.BOLD, 14));
+            editButton.setPreferredSize(new Dimension(100, 44));
+            editButton.setEnabled(!productionTransactionInProgress);
+            editButton.addActionListener(event -> enterProductToolbarMode());
+            footerButtons.add(editButton);
+        } else {
+            RoundedButton undoButton = new RoundedButton("Undo", theme.input(), theme.text(), 10);
+            undoButton.setFont(new Font("SansSerif", Font.BOLD, 14));
+            undoButton.setPreferredSize(new Dimension(92, 44));
+            undoButton.setEnabled(!productionTransactionInProgress
+                    && productTextUndoManager.canUndo());
+            undoButton.addActionListener(event -> undoProductAction());
+            productUndoButton = undoButton;
+
+            RoundedButton cancelButton = new RoundedButton(
+                    "Cancel", theme.input(), theme.text(), 10);
+            cancelButton.setFont(new Font("SansSerif", Font.BOLD, 14));
+            cancelButton.setPreferredSize(new Dimension(100, 44));
+            cancelButton.setEnabled(!productionTransactionInProgress);
+            cancelButton.addActionListener(event -> cancelProductCatalogChanges());
+            footerButtons.add(undoButton);
+            footerButtons.add(cancelButton);
+        }
+        String primaryLabel = productCatalogMode == ProductCatalogMode.ADD ? "Add"
+                : productCatalogMode == ProductCatalogMode.DELETE ? "Delete" : "Save";
+        Color primaryFill = productCatalogMode == ProductCatalogMode.DELETE
+                ? theme.danger() : new Color(0x23211F);
+        RoundedButton primaryButton = new RoundedButton(primaryLabel, primaryFill, Color.WHITE);
+        primaryButton.setFont(new Font("SansSerif", Font.BOLD, 14));
+        primaryButton.setPreferredSize(new Dimension(120, 44));
+        primaryButton.setEnabled(!productionTransactionInProgress);
+        primaryButton.addActionListener(event -> handleProductFooterAction());
+        footerButtons.add(primaryButton);
+        if (productCatalogMode == ProductCatalogMode.NORMAL) {
+            productUndoButton = null;
+        }
+        footer.add(footerButtons, BorderLayout.EAST);
+        catalog.add(footer, BorderLayout.SOUTH);
+        page.add(catalog, BorderLayout.CENTER);
         return page;
     }
 
@@ -1131,12 +1511,11 @@ public class TowHitchSystemPure {
             searchHighlightComponent = card;
         }
         card.setLayout(new BorderLayout(0, 12));
-        card.setBorder(BorderFactory.createEmptyBorder(17, 18, 17, 18));
+        card.setBorder(BorderFactory.createEmptyBorder(
+                17, productCatalogMode == ProductCatalogMode.DELETE ? 10 : 18, 17, 18));
 
-        JLabel name = new JLabel(product);
-        name.setFont(new Font("SansSerif", Font.BOLD, 17));
-        name.setForeground(theme.text());
-        boolean expanded = Boolean.TRUE.equals(expandedBOMCards.get(product));
+        JComponent name = productNameComponent(product);
+        boolean expanded = Boolean.TRUE.equals(productExpansionMap.get(product));
         RoundedButton expandButton = secondaryButton(expanded ? "\u25B2" : "\u25BC");
         expandButton.setPreferredSize(new Dimension(38, 34));
         expandButton.setToolTipText(expanded ? "Hide bill of materials" : "Show bill of materials");
@@ -1145,7 +1524,30 @@ public class TowHitchSystemPure {
         productTitle.setOpaque(false);
         productTitle.add(name, BorderLayout.CENTER);
         productTitle.add(expandButton, BorderLayout.EAST);
-        JLabel onHand = new JLabel("Finished units on hand: " + finishedGoods.get(product));
+        if (productCatalogMode == ProductCatalogMode.DELETE) {
+            SelectionCircleButton select = new SelectionCircleButton();
+            select.setSelected(selectedProductsForDeletion.contains(product));
+            select.addActionListener(event -> {
+                boolean selectedBeforeClick = !select.isSelected();
+                pushProductActionUndo(() -> {
+                    if (selectedBeforeClick) {
+                        selectedProductsForDeletion.add(product);
+                    } else {
+                        selectedProductsForDeletion.remove(product);
+                    }
+                    showPage("Production");
+                });
+                if (select.isSelected()) {
+                    selectedProductsForDeletion.add(product);
+                } else {
+                    selectedProductsForDeletion.remove(product);
+                }
+            });
+            productTitle.add(select, BorderLayout.WEST);
+        }
+        int quantity = finishedGoods.getOrDefault(
+                product, stagedProductAdditions.getOrDefault(product, 0));
+        JLabel onHand = new JLabel("Finished units on hand: " + quantity);
         onHand.setFont(SMALL_FONT);
         onHand.setForeground(theme.secondaryText());
         JPanel heading = new JPanel(new BorderLayout(0, 7));
@@ -1159,7 +1561,7 @@ public class TowHitchSystemPure {
         requirements.setLayout(new javax.swing.BoxLayout(requirements, javax.swing.BoxLayout.Y_AXIS));
         requirements.setBorder(BorderFactory.createEmptyBorder(4, 0, 4, 0));
         List<String> missingItems = getUnavailableBOMItems(product);
-        for (BOMItem bomItem : billOfMaterials.get(product)) {
+        for (BOMItem bomItem : billOfMaterials.getOrDefault(product, Collections.emptyList())) {
             int available = getStockQuantity(bomItem.materialName);
             JLabel line = new JLabel(bomItem.materialName + "   " + available + " available / "
                     + bomItem.quantityRequired + " required");
@@ -1177,9 +1579,21 @@ public class TowHitchSystemPure {
         JLabel status = new JLabel();
         status.setFont(SMALL_FONT);
         boolean materialsAvailable = missingItems.isEmpty();
-        boolean finishedCapacityAvailable = finishedGoods.get(product) < Integer.MAX_VALUE;
-        boolean stockAvailable = materialsAvailable && finishedCapacityAvailable;
-        if (stockAvailable) {
+        boolean isStagedProduct = stagedProductAdditions.containsKey(product);
+        boolean finishedCapacityAvailable = quantity < Integer.MAX_VALUE;
+        boolean stockAvailable = !isStagedProduct && materialsAvailable && finishedCapacityAvailable
+                && productionHistoryLoaded && !productionTransactionInProgress
+                && productCatalogMode == ProductCatalogMode.NORMAL;
+        if (isStagedProduct) {
+            status.setText("New product profile — Save to commit");
+            status.setForeground(theme.secondaryText());
+        } else if (!productionHistoryLoaded) {
+            status.setText("Loading production history...");
+            status.setForeground(theme.secondaryText());
+        } else if (productionTransactionInProgress) {
+            status.setText("Recording production...");
+            status.setForeground(theme.secondaryText());
+        } else if (stockAvailable) {
             status.setText("Materials available");
             status.setForeground(theme.success());
         } else if (!materialsAvailable) {
@@ -1201,12 +1615,367 @@ public class TowHitchSystemPure {
         return card;
     }
 
-    private void toggleProductionCard(String product) {
-        if (Boolean.TRUE.equals(expandedBOMCards.get(product))) {
-            expandedBOMCards.remove(product);
-        } else {
-            expandedBOMCards.put(product, Boolean.TRUE);
+    private JPanel buildProductDraftCard() {
+        RoundedPanel card = new RoundedPanel(20);
+        card.setBackground(theme.panel());
+        card.setLayout(new BorderLayout(0, 12));
+        card.setBorder(BorderFactory.createEmptyBorder(17, 18, 17, 18));
+        pendingProductDraft.nameField.setFont(new Font("SansSerif", Font.BOLD, 17));
+        pendingProductDraft.nameField.setForeground(theme.text());
+        pendingProductDraft.nameField.setCaretColor(theme.text());
+        pendingProductDraft.nameField.setOpaque(false);
+        pendingProductDraft.nameField.setBorder(null);
+        pendingProductDraft.nameField.setMargin(new Insets(0, 8, 0, 8));
+        pendingProductDraft.nameField.setPreferredSize(new Dimension(220, 30));
+        JLabel status = new JLabel("New product profile");
+        status.setFont(SMALL_FONT);
+        status.setForeground(theme.secondaryText());
+        card.add(pendingProductDraft.nameField, BorderLayout.NORTH);
+        card.add(status, BorderLayout.CENTER);
+        card.setAlignmentX(JComponent.LEFT_ALIGNMENT);
+        card.setMaximumSize(new Dimension(Integer.MAX_VALUE, card.getPreferredSize().height));
+        return card;
+    }
+
+    private JComponent productNameComponent(String product) {
+        JTextField editField = productNameEdits.get(product);
+        if (productCatalogMode == ProductCatalogMode.EDIT_NAMES && editField != null) {
+            editField.setFont(new Font("SansSerif", Font.BOLD, 17));
+            editField.setForeground(theme.text());
+            editField.setCaretColor(theme.text());
+            editField.setOpaque(false);
+            editField.setBorder(null);
+            editField.setMargin(new Insets(0, 8, 0, 8));
+            editField.setPreferredSize(new Dimension(220, 30));
+            return editField;
         }
+        JLabel name = new JLabel(product);
+        name.setFont(new Font("SansSerif", Font.BOLD, 17));
+        name.setForeground(theme.text());
+        return name;
+    }
+
+    private void enterProductToolbarMode() {
+        if (!productionHistoryLoaded) {
+            showCatalogError("Production history is still loading. Please try again shortly.");
+            return;
+        }
+        productCatalogMode = ProductCatalogMode.TOOLBAR;
+        showPage("Production");
+    }
+
+    private void beginProductAddition() {
+        if (pendingProductDraft != null) {
+            return;
+        }
+        pendingProductDraft = new ProductDraft();
+        attachProductTextUndo(pendingProductDraft.nameField);
+        productCatalogMode = ProductCatalogMode.ADD;
+        pushProductActionUndo(() -> {
+            pendingProductDraft = null;
+            productCatalogMode = ProductCatalogMode.TOOLBAR;
+            showPage("Production");
+        });
+        showPage("Production");
+        if (productSaveStatus != null) {
+            productSaveStatus.setText("Enter the product name, then select Add.");
+        }
+        pendingProductDraft.nameField.requestFocusInWindow();
+    }
+
+    private boolean stageProductAddition() {
+        if (pendingProductDraft == null) {
+            showCatalogError("There is no new product card to add.");
+            return false;
+        }
+        String name = pendingProductDraft.nameField.getText().trim();
+        if (!isValidCatalogName(name)) {
+            showCatalogError("Enter a product name without tabs or line breaks.");
+            pendingProductDraft.nameField.requestFocusInWindow();
+            return false;
+        }
+        if (containsItemIgnoreCase(finishedGoods, name)
+                || containsItemIgnoreCase(stagedProductAdditions, name)) {
+            showCatalogError("A product with the name \"" + name + "\" already exists.");
+            pendingProductDraft.nameField.requestFocusInWindow();
+            return false;
+        }
+        ProductDraft draft = pendingProductDraft;
+        stagedProductAdditions.put(name, 0);
+        pendingProductDraft = null;
+        productCatalogMode = ProductCatalogMode.TOOLBAR;
+        pushProductActionUndo(() -> {
+            stagedProductAdditions.remove(name);
+            productNameEdits.remove(name);
+            productExpansionMap.remove(name);
+            pendingProductDraft = draft;
+            productCatalogMode = ProductCatalogMode.ADD;
+            showPage("Production");
+        });
+        showPage("Production");
+        return true;
+    }
+
+    private void beginProductNameEdit() {
+        for (String product : finishedGoods.keySet()) {
+            if (!productNameEdits.containsKey(product)) {
+                JTextField field = new JTextField(product, 24);
+                attachProductTextUndo(field);
+                productNameEdits.put(product, field);
+            }
+        }
+        for (String product : stagedProductAdditions.keySet()) {
+            if (!productNameEdits.containsKey(product)) {
+                JTextField field = new JTextField(product, 24);
+                attachProductTextUndo(field);
+                productNameEdits.put(product, field);
+            }
+        }
+        productCatalogMode = ProductCatalogMode.EDIT_NAMES;
+        showPage("Production");
+        if (!productNameEdits.isEmpty()) {
+            JTextField firstField = productNameEdits.values().iterator().next();
+            SwingUtilities.invokeLater(() -> {
+                firstField.requestFocusInWindow();
+                firstField.setCaretPosition(firstField.getText().length());
+            });
+        }
+    }
+
+    private void beginProductDeletion() {
+        productCatalogMode = ProductCatalogMode.DELETE;
+        showPage("Production");
+        if (productSaveStatus != null) {
+            productSaveStatus.setText("Select products to delete, then select Delete.");
+        }
+    }
+
+    private void handleProductFooterAction() {
+        if (productCatalogMode == ProductCatalogMode.ADD) {
+            if (stageProductAddition()) {
+                if (productSaveStatus != null) {
+                    productSaveStatus.setText("Product staged. Select Save to commit changes.");
+                }
+            }
+            return;
+        }
+        if (productCatalogMode == ProductCatalogMode.DELETE) {
+            int choice = showThemedChoiceDialog("Confirm Deletion",
+                    "Are you sure you want to delete the selected items?", "Yes", "No");
+            if (choice != 0) {
+                return;
+            }
+        }
+        if (productCatalogMode == ProductCatalogMode.NORMAL
+                && stagedProductAdditions.isEmpty() && productNameEdits.isEmpty()
+                && selectedProductsForDeletion.isEmpty()) {
+            if (productSaveStatus != null) {
+                productSaveStatus.setForeground(theme.success());
+                productSaveStatus.setText("Changes saved successfully!");
+            }
+            return;
+        }
+        if (commitProductCatalogChanges() && productSaveStatus != null) {
+            productSaveStatus.setForeground(theme.success());
+            productSaveStatus.setText("Changes saved successfully!");
+        }
+    }
+
+    private boolean commitProductCatalogChanges() {
+        Map<String, Integer> currentProducts = new LinkedHashMap<>(finishedGoods);
+        currentProducts.putAll(stagedProductAdditions);
+        Map<String, Integer> updatedProducts = new LinkedHashMap<>();
+        Map<String, Boolean> updatedExpansion = new LinkedHashMap<>();
+        Map<String, List<BOMItem>> updatedBOM = new LinkedHashMap<>();
+        Map<String, Integer> updatedOpeningBalances = new LinkedHashMap<>();
+        Map<String, Long> updatedLifetimeUnits = new LinkedHashMap<>();
+        Map<String, Integer> updatedActiveUnits = new LinkedHashMap<>();
+        Map<String, String> renamedProducts = new LinkedHashMap<>();
+        Set<String> uniqueNames = new HashSet<>();
+
+        for (Map.Entry<String, Integer> entry : currentProducts.entrySet()) {
+            String oldName = entry.getKey();
+            if (selectedProductsForDeletion.contains(oldName)) {
+                continue;
+            }
+            JTextField editField = productNameEdits.get(oldName);
+            String newName = editField == null ? oldName : editField.getText().trim();
+            if (!isValidCatalogName(newName)) {
+                showCatalogError("Enter a product name without tabs or line breaks.");
+                if (editField != null) {
+                    editField.requestFocusInWindow();
+                }
+                return false;
+            }
+            if (!uniqueNames.add(newName.toLowerCase(Locale.ROOT))) {
+                showCatalogError("A product with the name \"" + newName + "\" already exists.");
+                if (editField != null) {
+                    editField.requestFocusInWindow();
+                }
+                return false;
+            }
+            updatedProducts.put(newName, entry.getValue());
+            updatedExpansion.put(newName,
+                    productExpansionMap.getOrDefault(oldName, Boolean.FALSE));
+            updatedBOM.put(newName, billOfMaterials.getOrDefault(oldName, Collections.emptyList()));
+            updatedOpeningBalances.put(newName,
+                    productionOpeningBalances.getOrDefault(oldName, 0));
+            updatedLifetimeUnits.put(newName,
+                    lifetimeProductionUnits.getOrDefault(oldName, 0L));
+            if (activeProductionUnits.containsKey(oldName)) {
+                updatedActiveUnits.put(newName, activeProductionUnits.get(oldName));
+            }
+            if (!oldName.equals(newName)) {
+                renamedProducts.put(oldName, newName);
+            }
+        }
+
+        Map<String, Integer> previousFinishedGoods = new LinkedHashMap<>(finishedGoods);
+        Map<String, Boolean> previousExpansion = new LinkedHashMap<>(productExpansionMap);
+        Map<String, List<BOMItem>> previousBOM = new LinkedHashMap<>(billOfMaterials);
+        Map<String, Integer> previousOpeningBalances =
+                new LinkedHashMap<>(productionOpeningBalances);
+        Map<String, Long> previousLifetimeUnits = new LinkedHashMap<>(lifetimeProductionUnits);
+        Map<String, Integer> previousActiveUnits = new LinkedHashMap<>(activeProductionUnits);
+        List<String> sortedNames = new ArrayList<>(updatedProducts.keySet());
+        sortedNames.sort(String.CASE_INSENSITIVE_ORDER);
+        finishedGoods.clear();
+        for (String name : sortedNames) {
+            finishedGoods.put(name, updatedProducts.get(name));
+        }
+        productExpansionMap.clear();
+        productExpansionMap.putAll(updatedExpansion);
+        billOfMaterials.clear();
+        billOfMaterials.putAll(updatedBOM);
+        productionOpeningBalances.clear();
+        productionOpeningBalances.putAll(updatedOpeningBalances);
+        lifetimeProductionUnits.clear();
+        lifetimeProductionUnits.putAll(updatedLifetimeUnits);
+        activeProductionUnits.clear();
+        activeProductionUnits.putAll(updatedActiveUnits);
+        try {
+            saveInventory();
+        } catch (IOException e) {
+            finishedGoods.clear();
+            finishedGoods.putAll(previousFinishedGoods);
+            productExpansionMap.clear();
+            productExpansionMap.putAll(previousExpansion);
+            billOfMaterials.clear();
+            billOfMaterials.putAll(previousBOM);
+            productionOpeningBalances.clear();
+            productionOpeningBalances.putAll(previousOpeningBalances);
+            lifetimeProductionUnits.clear();
+            lifetimeProductionUnits.putAll(previousLifetimeUnits);
+            activeProductionUnits.clear();
+            activeProductionUnits.putAll(previousActiveUnits);
+            showCatalogError("Unable to save product changes to inventory_data.txt:\n"
+                    + e.getMessage());
+            return false;
+        }
+        if (!renamedProducts.isEmpty()) {
+            productAliasUpdateInProgress = true;
+            productionBackend.execute(() -> applyProductAliases(renamedProducts));
+        }
+        stagedProductAdditions.clear();
+        productNameEdits.clear();
+        selectedProductsForDeletion.clear();
+        pendingProductDraft = null;
+        productTextUndoManager.discardAllEdits();
+        productCatalogMode = ProductCatalogMode.NORMAL;
+        productUndoButton = null;
+        showPage("Production");
+        return true;
+    }
+
+    private void cancelProductCatalogChanges() {
+        for (String product : stagedProductAdditions.keySet()) {
+            productExpansionMap.remove(product);
+        }
+        stagedProductAdditions.clear();
+        productNameEdits.clear();
+        selectedProductsForDeletion.clear();
+        pendingProductDraft = null;
+        productTextUndoManager.discardAllEdits();
+        productCatalogMode = ProductCatalogMode.NORMAL;
+        productUndoButton = null;
+        showPage("Production");
+    }
+
+    private void attachProductTextUndo(JTextField field) {
+        field.getDocument().addUndoableEditListener(event -> {
+            productTextUndoManager.addEdit(event.getEdit());
+            refreshProductUndoButton();
+        });
+        field.getDocument().addDocumentListener(new DocumentListener() {
+            @Override
+            public void insertUpdate(DocumentEvent event) {
+                refreshProductUndoButton();
+            }
+
+            @Override
+            public void removeUpdate(DocumentEvent event) {
+                refreshProductUndoButton();
+            }
+
+            @Override
+            public void changedUpdate(DocumentEvent event) {
+                refreshProductUndoButton();
+            }
+        });
+    }
+
+    private void pushProductActionUndo(Runnable undoAction) {
+        productTextUndoManager.addEdit(new javax.swing.undo.AbstractUndoableEdit() {
+            private static final long serialVersionUID = 1L;
+
+            @Override
+            public void undo() {
+                super.undo();
+                undoAction.run();
+            }
+
+            @Override
+            public String getPresentationName() {
+                return "Product catalog action";
+            }
+        });
+        refreshProductUndoButton();
+    }
+
+    private void undoProductAction() {
+        if (productTextUndoManager.canUndo()) {
+            productTextUndoManager.undo();
+        }
+        refreshProductUndoButton();
+        applicationRoot.repaint();
+    }
+
+    private void refreshProductUndoButton() {
+        if (productUndoButton != null) {
+            productUndoButton.setEnabled(productTextUndoManager.canUndo());
+        }
+    }
+
+    private boolean resolvePendingProductChanges() {
+        if (productCatalogMode != ProductCatalogMode.NORMAL
+                || pendingProductDraft != null || !stagedProductAdditions.isEmpty()
+                || !productNameEdits.isEmpty() || !selectedProductsForDeletion.isEmpty()) {
+            JOptionPane.showMessageDialog(frame,
+                    "Save or cancel pending product changes from the Production footer before leaving.",
+                    "Pending Product Changes", JOptionPane.WARNING_MESSAGE);
+            return false;
+        }
+        return true;
+    }
+
+    private boolean isValidCatalogName(String name) {
+        return !name.isEmpty() && name.indexOf('\t') < 0
+                && name.indexOf('\n') < 0 && name.indexOf('\r') < 0;
+    }
+
+    private void toggleProductionCard(String product) {
+        productExpansionMap.put(product,
+                !Boolean.TRUE.equals(productExpansionMap.get(product)));
         showPage("Production");
     }
 
@@ -1649,7 +2418,7 @@ public class TowHitchSystemPure {
     private boolean adjustStock(String itemName, Map<String, Integer> inventory, int delta,
             JTextField quantityField, JLabel stockStatus) {
         Integer pendingQuantity = pendingStockUpdates.get(itemName);
-        int previous = pendingQuantity == null ? inventory.get(itemName) : pendingQuantity;
+        int previous = pendingQuantity == null ? getStockQuantity(itemName) : pendingQuantity;
         long updated = (long) previous + delta;
         if (updated < 0) {
             JOptionPane.showMessageDialog(frame, "Stock cannot be reduced below zero.",
@@ -1681,7 +2450,10 @@ public class TowHitchSystemPure {
 
     private int getStockQuantity(String itemName) {
         Integer pending = pendingStockUpdates.get(itemName);
-        return pending == null ? rawMaterials.get(itemName) : pending;
+        Integer onHand = pending == null
+                ? rawMaterials.getOrDefault(itemName, stagedMaterialAdditions.get(itemName))
+                : pending;
+        return onHand == null ? 0 : onHand;
     }
 
     private void stageManualStockOverride(String itemName, JTextField quantityField) {
@@ -1691,63 +2463,180 @@ public class TowHitchSystemPure {
             quantity = Integer.parseInt(entered);
         } catch (NumberFormatException e) {
             quantityField.setText(String.valueOf(getStockQuantity(itemName)));
-            quantityField.setToolTipText("Enter a whole number from 0 to " + Integer.MAX_VALUE);
             return;
         }
         if (quantity < 0) {
             quantityField.setText(String.valueOf(getStockQuantity(itemName)));
-            quantityField.setToolTipText("Stock cannot be reduced below zero.");
             return;
         }
-        if (quantity == rawMaterials.get(itemName)) {
+        Integer savedQuantity = stagedMaterialAdditions.containsKey(itemName)
+                ? stagedMaterialAdditions.get(itemName) : rawMaterials.get(itemName);
+        if (savedQuantity != null && quantity == savedQuantity) {
             pendingStockUpdates.remove(itemName);
         } else {
             pendingStockUpdates.put(itemName, quantity);
         }
-        quantityField.setToolTipText(pendingStockUpdates.containsKey(itemName)
-                ? "Unsaved stock update" : "Click to enter an exact stock quantity");
         updateNotificationBadge();
     }
 
     private boolean resolvePendingStockUpdates() {
-        if (pendingStockUpdates.isEmpty()) {
-            return true;
-        }
-        int choice = showThemedChoiceDialog("Unsaved Stock Updates",
-                "You have unsaved stock updates. Save or Discard changes?",
-                "Save", "Discard");
-        if (choice == 1) {
-            pendingStockUpdates.clear();
-            updateNotificationBadge();
-            return true;
-        }
-        if (choice != 0) {
+        if (!pendingStockUpdates.isEmpty() || !pendingMaterialDrafts.isEmpty()
+                || !stagedMaterialAdditions.isEmpty()
+                || !materialNameEdits.isEmpty() || !selectedMaterialsForDeletion.isEmpty()
+                || stockFooterMode != StockFooterMode.NORMAL) {
+            JOptionPane.showMessageDialog(frame,
+                    "Save or cancel pending stock changes from the Stocks footer before leaving.",
+                    "Pending Material Changes", JOptionPane.WARNING_MESSAGE);
             return false;
         }
-
-        return commitPendingStockUpdates();
+        return true;
     }
 
     private boolean commitPendingStockUpdates() {
-        if (pendingStockUpdates.isEmpty()) {
+        if (!stockFooterSaveInProgress
+                && (!pendingStockUpdates.isEmpty() || !pendingMaterialDrafts.isEmpty()
+                        || !stagedMaterialAdditions.isEmpty()
+                        || !materialNameEdits.isEmpty() || !selectedMaterialsForDeletion.isEmpty()
+                        || stockFooterMode != StockFooterMode.NORMAL)) {
+            showCatalogError("Use the Stocks footer Save button to commit material changes.");
+            return false;
+        }
+        if (pendingStockUpdates.isEmpty() && pendingMaterialDrafts.isEmpty()
+                && stagedMaterialAdditions.isEmpty()
+                && materialNameEdits.isEmpty()
+                && selectedMaterialsForDeletion.isEmpty()) {
+            if (stockFooterMode != StockFooterMode.NORMAL) {
+                stockFooterMode = StockFooterMode.NORMAL;
+                showPage("Stocks");
+            }
             return true;
         }
-        Map<String, Integer> previousValues = new LinkedHashMap<>();
-        for (Map.Entry<String, Integer> update : pendingStockUpdates.entrySet()) {
-            previousValues.put(update.getKey(), rawMaterials.get(update.getKey()));
-            rawMaterials.put(update.getKey(), update.getValue());
+        Map<String, Integer> additions = new LinkedHashMap<>();
+        for (Map.Entry<String, Integer> addition : stagedMaterialAdditions.entrySet()) {
+            if (!selectedMaterialsForDeletion.contains(addition.getKey())) {
+                additions.put(addition.getKey(),
+                        pendingStockUpdates.getOrDefault(addition.getKey(), addition.getValue()));
+            }
         }
+        for (MaterialDraft draft : pendingMaterialDrafts) {
+            String name = draft.nameField.getText().trim();
+            if (name.isEmpty() || name.indexOf('\t') >= 0
+                    || name.indexOf('\n') >= 0 || name.indexOf('\r') >= 0) {
+                showCatalogError("Enter a material name without tabs or line breaks.");
+                draft.nameField.requestFocusInWindow();
+                return false;
+            }
+            if (containsItemIgnoreCase(rawMaterials, name)
+                    || containsItemIgnoreCase(additions, name)) {
+                showCatalogError("A material with the name \"" + name + "\" already exists.");
+                draft.nameField.requestFocusInWindow();
+                return false;
+            }
+            final int quantity;
+            try {
+                quantity = Integer.parseInt(draft.quantityField.getText().trim());
+            } catch (NumberFormatException e) {
+                showCatalogError("Enter a whole number from 0 to " + Integer.MAX_VALUE
+                        + " for " + name + ".");
+                draft.quantityField.requestFocusInWindow();
+                return false;
+            }
+            if (quantity < 0) {
+                showCatalogError("Stock quantity cannot be negative for " + name + ".");
+                draft.quantityField.requestFocusInWindow();
+                return false;
+            }
+            additions.put(name, quantity);
+        }
+
+        Map<String, String> renamedMaterials = new LinkedHashMap<>();
+        Set<String> uniqueNames = new HashSet<>();
+        for (String oldName : rawMaterials.keySet()) {
+            if (selectedMaterialsForDeletion.contains(oldName)) {
+                continue;
+            }
+            JTextField editField = materialNameEdits.get(oldName);
+            String newName = editField == null ? oldName : editField.getText().trim();
+            if (newName.isEmpty() || newName.indexOf('\t') >= 0
+                    || newName.indexOf('\n') >= 0 || newName.indexOf('\r') >= 0) {
+                showCatalogError("Enter a material name without tabs or line breaks.");
+                if (editField != null) {
+                    editField.requestFocusInWindow();
+                }
+                return false;
+            }
+            if (!uniqueNames.add(newName.toLowerCase(Locale.ROOT))) {
+                showCatalogError("A material with the name \"" + newName + "\" already exists.");
+                if (editField != null) {
+                    editField.requestFocusInWindow();
+                }
+                return false;
+            }
+            if (!oldName.equals(newName)) {
+                renamedMaterials.put(oldName, newName);
+            }
+        }
+        for (String newName : additions.keySet()) {
+            if (!uniqueNames.add(newName.toLowerCase(Locale.ROOT))) {
+                showCatalogError("A material with the name \"" + newName + "\" already exists.");
+                return false;
+            }
+        }
+
+        Map<String, Integer> previousFinishedValues = new LinkedHashMap<>(finishedGoods);
+        Map<String, Integer> previousRawValues = new LinkedHashMap<>(rawMaterials);
+        Map<String, Integer> previousPendingValues = new LinkedHashMap<>(pendingStockUpdates);
+        Map<String, List<BOMItem>> previousBillOfMaterials =
+                new LinkedHashMap<>(billOfMaterials);
+        Map<String, Integer> updatedRawMaterials = new LinkedHashMap<>();
+        for (Map.Entry<String, Integer> material : rawMaterials.entrySet()) {
+            String oldName = material.getKey();
+            if (selectedMaterialsForDeletion.contains(oldName)) {
+                continue;
+            }
+            String newName = renamedMaterials.getOrDefault(oldName, oldName);
+            int quantity = pendingStockUpdates.getOrDefault(oldName, material.getValue());
+            updatedRawMaterials.put(newName, quantity);
+        }
+        for (String product : new ArrayList<>(billOfMaterials.keySet())) {
+            List<BOMItem> updatedItems = new ArrayList<>();
+            for (BOMItem item : billOfMaterials.get(product)) {
+                updatedItems.add(new BOMItem(
+                        renamedMaterials.getOrDefault(item.materialName, item.materialName),
+                        item.quantityRequired));
+            }
+            billOfMaterials.put(product, Collections.unmodifiableList(updatedItems));
+        }
+        rawMaterials.clear();
+        rawMaterials.putAll(updatedRawMaterials);
+        rawMaterials.putAll(additions);
         try {
             saveInventory();
         } catch (IOException e) {
-            for (Map.Entry<String, Integer> previous : previousValues.entrySet()) {
-                rawMaterials.put(previous.getKey(), previous.getValue());
-            }
+            finishedGoods.clear();
+            finishedGoods.putAll(previousFinishedValues);
+            rawMaterials.clear();
+            rawMaterials.putAll(previousRawValues);
+            pendingStockUpdates.clear();
+            pendingStockUpdates.putAll(previousPendingValues);
+            billOfMaterials.clear();
+            billOfMaterials.putAll(previousBillOfMaterials);
             showSaveError(e);
             return false;
         }
         pendingStockUpdates.clear();
+        pendingMaterialDrafts.clear();
+        stagedMaterialAdditions.clear();
+        materialNameEdits.clear();
+        selectedMaterialsForDeletion.clear();
+        stockTextUndoManager.discardAllEdits();
+        stockActionUndoHistory.clear();
+        stockFooterMode = StockFooterMode.NORMAL;
+        stockUndoButton = null;
         updateNotificationBadge();
+        if ("Stocks".equals(currentPage)) {
+            showPage("Stocks");
+        }
         return true;
     }
 
@@ -1755,7 +2644,16 @@ public class TowHitchSystemPure {
         if (page.equals(currentPage)) {
             return;
         }
+        if (productionTransactionInProgress) {
+            JOptionPane.showMessageDialog(frame,
+                    "Please wait for the production transaction to finish.",
+                    "Production In Progress", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
         if ("Stocks".equals(currentPage) && !resolvePendingStockUpdates()) {
+            return;
+        }
+        if ("Production".equals(currentPage) && !resolvePendingProductChanges()) {
             return;
         }
         currentPage = page;
@@ -1763,6 +2661,10 @@ public class TowHitchSystemPure {
     }
 
     private void produceProduct(String product) {
+        if (!productionHistoryLoaded || productionTransactionInProgress
+                || productCatalogMode != ProductCatalogMode.NORMAL) {
+            return;
+        }
         List<String> unavailable = getUnavailableBOMItems(product);
         if (!unavailable.isEmpty()) {
             JOptionPane.showMessageDialog(frame,
@@ -1772,64 +2674,398 @@ public class TowHitchSystemPure {
             showPage("Production");
             return;
         }
-        if (finishedGoods.get(product) == Integer.MAX_VALUE) {
+        if (finishedGoods.getOrDefault(product, 0) == Integer.MAX_VALUE) {
             JOptionPane.showMessageDialog(frame, "Finished stock has reached the maximum supported quantity.",
                     "Production Unavailable", JOptionPane.WARNING_MESSAGE);
             return;
         }
 
-        Map<String, Integer> finishedSnapshot = new LinkedHashMap<>(finishedGoods);
-        Map<String, Integer> rawSnapshot = new LinkedHashMap<>(rawMaterials);
-        for (BOMItem bomItem : billOfMaterials.get(product)) {
-            rawMaterials.put(bomItem.materialName,
-                    rawMaterials.get(bomItem.materialName) - bomItem.quantityRequired);
+        Instant producedAt = Instant.now();
+        List<BOMItem> consumedItems = new ArrayList<>(
+                billOfMaterials.getOrDefault(product, Collections.emptyList()));
+        Map<String, Integer> updatedRaw = new LinkedHashMap<>(rawMaterials);
+        for (BOMItem bomItem : billOfMaterials.getOrDefault(product, Collections.emptyList())) {
+            updatedRaw.put(bomItem.materialName,
+                    updatedRaw.get(bomItem.materialName) - bomItem.quantityRequired);
         }
-        finishedGoods.put(product, finishedGoods.get(product) + 1);
-        try {
-            saveInventory();
-        } catch (IOException e) {
-            finishedGoods.clear();
-            finishedGoods.putAll(finishedSnapshot);
-            rawMaterials.clear();
-            rawMaterials.putAll(rawSnapshot);
-            showSaveError(e);
+        Map<String, Integer> persistedFinished = getPersistedFinishedGoodsSnapshot();
+        if (persistedFinished.getOrDefault(product, 0) == Integer.MAX_VALUE) {
+            JOptionPane.showMessageDialog(frame,
+                    "Production history has reached the maximum inventory quantity.",
+                    "Production Unavailable", JOptionPane.WARNING_MESSAGE);
             return;
         }
-        try {
-            appendProductionHistory(product);
-        } catch (IOException e) {
-            JOptionPane.showMessageDialog(frame,
-                    "Production was saved, but its history records could not be written:\n"
-                            + e.getMessage(),
-                    "Production History Error", JOptionPane.ERROR_MESSAGE);
-        }
-        updateNotificationBadge();
+        persistedFinished.put(product, persistedFinished.getOrDefault(product, 0) + 1);
+        productionTransactionInProgress = true;
         showPage("Production");
-        applicationRoot.repaint();
+        ProductionBatch batch = new ProductionBatch(producedAt, product, 1);
+        productionBackend.execute(() -> {
+            IOException inventoryFailure = null;
+            IOException auditFailure = null;
+            boolean productionRecordWritten = false;
+            try {
+                saveInventorySnapshot(persistedFinished, updatedRaw);
+            } catch (IOException e) {
+                inventoryFailure = e;
+            }
+            if (inventoryFailure == null) {
+                try {
+                    appendProductionAudit(batch);
+                    productionRecordWritten = true;
+                    activeProductionBatches.add(batch);
+                    scheduleNextProductionExpiry();
+                } catch (IOException e) {
+                    auditFailure = e;
+                }
+                try {
+                    appendMaterialConsumptionAudit(batch, consumedItems);
+                } catch (IOException e) {
+                    if (auditFailure == null) {
+                        auditFailure = e;
+                    } else {
+                        auditFailure.addSuppressed(e);
+                    }
+                }
+                try {
+                    appendProductionHistory(batch, consumedItems);
+                } catch (IOException e) {
+                    if (auditFailure == null) {
+                        auditFailure = e;
+                    } else {
+                        auditFailure.addSuppressed(e);
+                    }
+                }
+            }
+            final IOException savedInventoryFailure = inventoryFailure;
+            final IOException savedAuditFailure = auditFailure;
+            final boolean savedProductionRecordWritten = productionRecordWritten;
+            SwingUtilities.invokeLater(() -> {
+                productionTransactionInProgress = false;
+                if (savedInventoryFailure != null) {
+                    showSaveError(savedInventoryFailure);
+                    showPage("Production");
+                    return;
+                }
+                rawMaterials.clear();
+                rawMaterials.putAll(updatedRaw);
+                long liveUnits = (long) finishedGoods.getOrDefault(product, 0) + 1;
+                finishedGoods.put(product, (int) Math.min(Integer.MAX_VALUE, liveUnits));
+                if (savedProductionRecordWritten) {
+                    lifetimeProductionUnits.merge(product, 1L, Long::sum);
+                    activeProductionUnits.merge(product, 1, (left, right) ->
+                            (int) Math.min(Integer.MAX_VALUE, (long) left + right));
+                } else {
+                    productionOpeningBalances.merge(product, 1, (left, right) ->
+                            (int) Math.min(Integer.MAX_VALUE, (long) left + right));
+                }
+                updateNotificationBadge();
+                showPage("Production");
+                if (savedAuditFailure != null) {
+                    JOptionPane.showMessageDialog(frame,
+                            "Production and inventory were saved, but one or more append-only "
+                                    + "history records could not be written:\n"
+                                    + savedAuditFailure.getMessage(),
+                            "Production History Error", JOptionPane.ERROR_MESSAGE);
+                }
+                applicationRoot.repaint();
+            });
+        });
     }
 
     private void initializeHistoryFile() throws IOException {
-        Path absoluteHistoryFile = HISTORY_FILE.toAbsolutePath();
-        Path parent = absoluteHistoryFile.getParent();
-        if (parent != null) {
-            Files.createDirectories(parent);
-        }
-        if (Files.notExists(absoluteHistoryFile)) {
-            Files.createFile(absoluteHistoryFile);
+        for (Path historyFile : Arrays.asList(
+                HISTORY_FILE, PRODUCTION_LOG_FILE, MATERIAL_CONSUMPTION_FILE,
+                PRODUCT_ALIAS_FILE)) {
+            Path absoluteHistoryFile = historyFile.toAbsolutePath();
+            Path parent = absoluteHistoryFile.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
+            if (Files.notExists(absoluteHistoryFile)) {
+                Files.createFile(absoluteHistoryFile);
+            }
         }
     }
 
-    private void appendProductionHistory(String product) throws IOException {
-        String timestamp = "[" + LocalDateTime.now().format(HISTORY_TIMESTAMP_FORMAT) + "] ";
+    private void appendProductionAudit(ProductionBatch batch) throws IOException {
+        String record = PRODUCTION_TIMESTAMP_FORMAT.format(batch.producedAt)
+                + "\t" + batch.productName + "\t" + batch.quantity;
+        appendAuditLine(PRODUCTION_LOG_FILE, record);
+    }
+
+    private void appendMaterialConsumptionAudit(ProductionBatch batch, List<BOMItem> items)
+            throws IOException {
+        if (items.isEmpty()) {
+            appendAuditLine(MATERIAL_CONSUMPTION_FILE,
+                    PRODUCTION_TIMESTAMP_FORMAT.format(batch.producedAt)
+                            + "\t" + batch.productName + "\t-\t0");
+            return;
+        }
+        for (BOMItem item : items) {
+            String record = PRODUCTION_TIMESTAMP_FORMAT.format(batch.producedAt)
+                    + "\t" + batch.productName + "\t" + item.materialName
+                    + "\t" + item.quantityRequired;
+            appendAuditLine(MATERIAL_CONSUMPTION_FILE, record);
+        }
+    }
+
+    private void appendAuditLine(Path path, String record) throws IOException {
+        boolean needsLineBreak = false;
+        if (Files.exists(path) && Files.size(path) > 0) {
+            long fileSize = Files.size(path);
+            try (SeekableByteChannel channel = Files.newByteChannel(path, StandardOpenOption.READ)) {
+                channel.position(fileSize - 1);
+                ByteBuffer lastByte = ByteBuffer.allocate(1);
+                channel.read(lastByte);
+                lastByte.flip();
+                needsLineBreak = lastByte.get() != (byte) '\n';
+            }
+        }
+        try (BufferedWriter writer = Files.newBufferedWriter(path, StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE, StandardOpenOption.APPEND)) {
+            if (needsLineBreak) {
+                writer.newLine();
+            }
+            writer.write(record);
+            writer.newLine();
+        }
+    }
+
+    private void applyProductAliases(Map<String, String> aliases) {
+        IOException aliasFailure = null;
+        for (Map.Entry<String, String> alias : aliases.entrySet()) {
+            try {
+                appendAuditLine(PRODUCT_ALIAS_FILE,
+                        PRODUCTION_TIMESTAMP_FORMAT.format(Instant.now())
+                                + "\t" + alias.getKey() + "\t" + alias.getValue());
+            } catch (IOException e) {
+                if (aliasFailure == null) {
+                    aliasFailure = e;
+                } else {
+                    aliasFailure.addSuppressed(e);
+                }
+            }
+        }
+        for (int index = 0; index < activeProductionBatches.size(); index++) {
+            ProductionBatch batch = activeProductionBatches.get(index);
+            String finalName = resolveProductAlias(batch.productName, aliases);
+            if (!finalName.equals(batch.productName)) {
+                activeProductionBatches.set(index,
+                        new ProductionBatch(batch.producedAt, finalName, batch.quantity));
+            }
+        }
+        Map<String, Integer> activeByProduct = aggregateActiveBatches();
+        IOException finalAliasFailure = aliasFailure;
+        SwingUtilities.invokeLater(() -> {
+            productAliasUpdateInProgress = false;
+            activeProductionUnits.clear();
+            activeProductionUnits.putAll(activeByProduct);
+            refreshFinishedGoodsFromActiveBatches(activeByProduct);
+            if (finalAliasFailure != null) {
+                JOptionPane.showMessageDialog(frame,
+                        "Product names were saved, but production history aliases could not "
+                                + "be fully archived:\n" + finalAliasFailure.getMessage(),
+                        "Production History Error", JOptionPane.ERROR_MESSAGE);
+            }
+            if (pageHost != null && "Production".equals(currentPage)) {
+                showPage("Production");
+            }
+        });
+        scheduleNextProductionExpiry();
+    }
+
+    private String resolveProductAlias(String product, Map<String, String> aliases) {
+        Set<String> visited = new HashSet<>();
+        String current = product;
+        while (aliases.containsKey(current) && visited.add(current)) {
+            current = aliases.get(current);
+        }
+        return current;
+    }
+
+    private Map<String, Integer> aggregateActiveBatches() {
+        Map<String, Integer> activeByProduct = new LinkedHashMap<>();
+        for (ProductionBatch batch : activeProductionBatches) {
+            activeByProduct.merge(batch.productName, batch.quantity, (left, right) ->
+                    (int) Math.min(Integer.MAX_VALUE, (long) left + right));
+        }
+        return activeByProduct;
+    }
+
+    private void appendProductionHistory(ProductionBatch batch, List<BOMItem> items)
+            throws IOException {
+        String timestamp = "[" + batch.producedAt.atZone(ZoneId.systemDefault())
+                .format(HISTORY_TIMESTAMP_FORMAT) + "] ";
         StringJoiner consumedMaterials = new StringJoiner(", ");
-        for (BOMItem item : billOfMaterials.get(product)) {
+        for (BOMItem item : items) {
             consumedMaterials.add(item.materialName + " (" + item.quantityRequired + ")");
         }
-        String productRecord = timestamp + "Produced: " + product + " (1)";
-        String consumptionRecord = timestamp + "Consumed for " + product + ": "
+        String productRecord = timestamp + "Produced: " + batch.productName
+                + " (" + batch.quantity + ")";
+        String consumptionRecord = timestamp + "Consumed for " + batch.productName + ": "
                 + consumedMaterials;
-        Files.write(HISTORY_FILE, Arrays.asList(productRecord, consumptionRecord),
-                StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        appendAuditLine(HISTORY_FILE, productRecord);
+        appendAuditLine(HISTORY_FILE, consumptionRecord);
+    }
+
+    private void loadProductionLedger(Map<String, Integer> inventoryAtStartup) {
+        Map<String, Long> rawTotalsByProduct = new LinkedHashMap<>();
+        Map<String, String> aliases = new LinkedHashMap<>();
+        Map<String, Long> totalsByProduct = new LinkedHashMap<>();
+        Map<String, Integer> activeByProduct = new LinkedHashMap<>();
+        List<ProductionBatch> activeBatches = new ArrayList<>();
+        Instant now = Instant.now();
+        Instant cutoff = now.minus(Duration.ofHours(72));
+        try (BufferedReader reader = Files.newBufferedReader(
+                PRODUCT_ALIAS_FILE, StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String[] fields = line.split("\\t", -1);
+                if (fields.length == 3 && !fields[1].isEmpty() && !fields[2].isEmpty()) {
+                    try {
+                        Instant.parse(fields[0]);
+                        aliases.put(fields[1], fields[2]);
+                    } catch (DateTimeParseException e) {
+                        System.err.println("Ignoring malformed product alias log row.");
+                    }
+                }
+            }
+        } catch (IOException e) {
+            SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(frame,
+                    "Unable to load product alias history:\n" + e.getMessage(),
+                    "Production History Error", JOptionPane.ERROR_MESSAGE));
+            return;
+        }
+        try (BufferedReader reader = Files.newBufferedReader(
+                PRODUCTION_LOG_FILE, StandardCharsets.UTF_8)) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String[] fields = line.split("\\t", -1);
+                if (fields.length != 3 || fields[1].isEmpty()) {
+                    continue;
+                }
+                Instant producedAt;
+                int quantity;
+                try {
+                    producedAt = Instant.parse(fields[0]);
+                    quantity = Integer.parseInt(fields[2]);
+                } catch (DateTimeParseException | NumberFormatException e) {
+                    System.err.println("Ignoring malformed production log row.");
+                    continue;
+                }
+                if (quantity <= 0) {
+                    System.err.println("Ignoring non-positive production log quantity.");
+                    continue;
+                }
+                if (producedAt.isAfter(now)) {
+                    System.err.println("Ignoring production log row with a future timestamp.");
+                    continue;
+                }
+                String product = fields[1];
+                rawTotalsByProduct.merge(product, (long) quantity,
+                        (left, right) -> left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right);
+                if (!producedAt.isBefore(cutoff) && !producedAt.isAfter(now)) {
+                    activeBatches.add(new ProductionBatch(producedAt, product, quantity));
+                }
+            }
+        } catch (IOException e) {
+            SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(frame,
+                    "Unable to load production batch history:\n" + e.getMessage(),
+                    "Production History Error", JOptionPane.ERROR_MESSAGE));
+            return;
+        }
+
+        for (Map.Entry<String, Long> entry : rawTotalsByProduct.entrySet()) {
+            String resolvedName = resolveProductAlias(entry.getKey(), aliases);
+            totalsByProduct.merge(resolvedName, entry.getValue(),
+                    (left, right) -> left > Long.MAX_VALUE - right ? Long.MAX_VALUE : left + right);
+        }
+        List<ProductionBatch> catalogBatches = new ArrayList<>();
+        for (ProductionBatch batch : activeBatches) {
+            String resolvedName = resolveProductAlias(batch.productName, aliases);
+            if (inventoryAtStartup.containsKey(resolvedName)) {
+                ProductionBatch resolvedBatch = new ProductionBatch(
+                        batch.producedAt, resolvedName, batch.quantity);
+                catalogBatches.add(resolvedBatch);
+                activeByProduct.merge(resolvedName, batch.quantity, (left, right) ->
+                        (int) Math.min(Integer.MAX_VALUE, (long) left + right));
+            }
+        }
+
+        SwingUtilities.invokeLater(() -> {
+            productionOpeningBalances.clear();
+            lifetimeProductionUnits.clear();
+            activeProductionUnits.clear();
+            activeProductionBatches.clear();
+            activeProductionBatches.addAll(catalogBatches);
+            lifetimeProductionUnits.putAll(totalsByProduct);
+            activeProductionUnits.putAll(activeByProduct);
+            for (Map.Entry<String, Integer> item : inventoryAtStartup.entrySet()) {
+                long baseline = Math.max(0L,
+                        (long) item.getValue() - totalsByProduct.getOrDefault(item.getKey(), 0L));
+                productionOpeningBalances.put(item.getKey(),
+                        (int) Math.min(Integer.MAX_VALUE, baseline));
+            }
+            refreshFinishedGoodsFromActiveBatches(activeByProduct);
+            productionHistoryLoaded = true;
+            if (pageHost != null && ("Production".equals(currentPage)
+                    || "Dashboard".equals(currentPage))) {
+                showPage(currentPage);
+            }
+            productionBackend.execute(this::scheduleNextProductionExpiry);
+        });
+    }
+
+    private void expireProductionBatches() {
+        Instant cutoff = Instant.now().minus(Duration.ofHours(72));
+        activeProductionBatches.removeIf(batch -> batch.producedAt.isBefore(cutoff));
+        Map<String, Integer> activeByProduct = new LinkedHashMap<>();
+        for (ProductionBatch batch : activeProductionBatches) {
+            activeByProduct.merge(batch.productName, batch.quantity, (left, right) ->
+                    (int) Math.min(Integer.MAX_VALUE, (long) left + right));
+        }
+        SwingUtilities.invokeLater(() -> {
+            if (!productionHistoryLoaded) {
+                return;
+            }
+            activeProductionUnits.clear();
+            activeProductionUnits.putAll(activeByProduct);
+            refreshFinishedGoodsFromActiveBatches(activeByProduct);
+            if (pageHost != null && ("Production".equals(currentPage)
+                    || "Dashboard".equals(currentPage))) {
+                showPage(currentPage);
+            }
+        });
+        scheduleNextProductionExpiry();
+    }
+
+    private void scheduleNextProductionExpiry() {
+        if (productionExpiryTask != null) {
+            productionExpiryTask.cancel(false);
+            productionExpiryTask = null;
+        }
+        if (activeProductionBatches.isEmpty()) {
+            return;
+        }
+        Instant nextExpiry = activeProductionBatches.get(0).producedAt.plus(Duration.ofHours(72));
+        for (ProductionBatch batch : activeProductionBatches) {
+            Instant expiry = batch.producedAt.plus(Duration.ofHours(72));
+            if (expiry.isBefore(nextExpiry)) {
+                nextExpiry = expiry;
+            }
+        }
+        long delayMillis = Math.max(1L,
+                Duration.between(Instant.now(), nextExpiry).toMillis());
+        productionExpiryTask = productionBackend.schedule(
+                this::expireProductionBatches, delayMillis, TimeUnit.MILLISECONDS);
+    }
+
+    private void refreshFinishedGoodsFromActiveBatches(Map<String, Integer> activeByProduct) {
+        for (String product : new ArrayList<>(finishedGoods.keySet())) {
+            long count = (long) productionOpeningBalances.getOrDefault(product, 0)
+                    + activeByProduct.getOrDefault(product, 0);
+            finishedGoods.put(product, (int) Math.min(Integer.MAX_VALUE, count));
+        }
     }
 
     private void updateNotificationBadge() {
@@ -1843,7 +3079,7 @@ public class TowHitchSystemPure {
 
     private List<String> getUnavailableBOMItems(String product) {
         List<String> unavailable = new ArrayList<>();
-        for (BOMItem bomItem : billOfMaterials.get(product)) {
+        for (BOMItem bomItem : billOfMaterials.getOrDefault(product, Collections.emptyList())) {
             int available = getStockQuantity(bomItem.materialName);
             if (available < bomItem.quantityRequired) {
                 unavailable.add(bomItem.materialName + " (need " + bomItem.quantityRequired
@@ -2301,6 +3537,12 @@ public class TowHitchSystemPure {
     }
 
     private void closeApplication() {
+        if (productionTransactionInProgress || productAliasUpdateInProgress) {
+            JOptionPane.showMessageDialog(frame,
+                    "Please wait for the production records to finish saving.",
+                    "Production In Progress", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
         if (exitConfirmationDialog != null && exitConfirmationDialog.isVisible()) {
             return;
         }
@@ -2323,7 +3565,9 @@ public class TowHitchSystemPure {
         yesButton.setFont(new Font("SansSerif", Font.BOLD, 14));
         yesButton.setPreferredSize(new Dimension(112, 42));
         yesButton.addActionListener(event -> {
-            boolean hadPendingUpdates = !pendingStockUpdates.isEmpty();
+            boolean hadPendingUpdates = !pendingStockUpdates.isEmpty()
+                    || !pendingMaterialDrafts.isEmpty()
+                    || !selectedMaterialsForDeletion.isEmpty();
             if (!commitPendingStockUpdates()) {
                 return;
             }
@@ -2365,6 +3609,10 @@ public class TowHitchSystemPure {
     }
 
     private void exitApplication(JDialog dialog) {
+        if (productionExpiryTask != null) {
+            productionExpiryTask.cancel(false);
+        }
+        productionBackend.shutdown();
         closeNotificationDropdown();
         closeSettingsDropdown();
         if (popupDismissListener != null) {
@@ -2386,53 +3634,10 @@ public class TowHitchSystemPure {
                 + e.getMessage(), "Inventory Save Error", JOptionPane.ERROR_MESSAGE);
     }
 
-    private long getFinishedUnitCount() throws IOException {
-        LocalDateTime now = LocalDateTime.now();
-        LocalDateTime cutoff = now.minusHours(72);
+    private long getFinishedUnitCount() {
         long total = 0;
-        List<String> historyLines = Files.readAllLines(HISTORY_FILE, StandardCharsets.UTF_8);
-        for (String line : historyLines) {
-            int timestampEnd = line.indexOf("] ");
-            if (!line.startsWith("[") || timestampEnd <= 1) {
-                continue;
-            }
-
-            LocalDateTime producedAt;
-            try {
-                producedAt = LocalDateTime.parse(
-                        line.substring(1, timestampEnd), HISTORY_TIMESTAMP_FORMAT);
-            } catch (java.time.format.DateTimeParseException e) {
-                continue;
-            }
-            if (producedAt.isBefore(cutoff) || producedAt.isAfter(now)) {
-                continue;
-            }
-
-            String details = line.substring(timestampEnd + 2);
-            String producedPrefix = "Produced: ";
-            if (!details.startsWith(producedPrefix)) {
-                continue;
-            }
-            String quantityAndProduct = parseQuantityAndName(
-                    details.substring(producedPrefix.length()));
-            if (quantityAndProduct == null) {
-                continue;
-            }
-
-            int separator = quantityAndProduct.indexOf(' ');
-            if (separator <= 0 || separator == quantityAndProduct.length() - 1) {
-                continue;
-            }
-            int quantity;
-            try {
-                quantity = Integer.parseInt(quantityAndProduct.substring(0, separator));
-            } catch (NumberFormatException e) {
-                continue;
-            }
-            String product = quantityAndProduct.substring(separator + 1);
-            if (quantity >= 0 && finishedGoods.containsKey(product)) {
-                total += quantity;
-            }
+        for (int quantity : activeProductionUnits.values()) {
+            total += quantity;
         }
         return total;
     }
@@ -2458,24 +3663,8 @@ public class TowHitchSystemPure {
     }
 
     private void initializeInventory() {
-        List<String> products = new ArrayList<>(Arrays.asList(
-                "Hitch Accessories", "Cargo Basket", "Bike Rack", "Trailer",
-                "Motor Rack Carrier", "Clamp", "Hitch Ball Assembly"));
-        products.sort(String.CASE_INSENSITIVE_ORDER);
-        for (String product : products) {
-            finishedGoods.put(product, 0);
-        }
-        List<String> materials = new ArrayList<>(Arrays.asList(
-                "Mild steel plates", "Square steel tubing", "Steel flat bars", "Steel rods",
-                "Bolts", "Nuts", "Washers", "Welding rods", "Metal primer", "Paint",
-                "Expanded metal mesh", "Round steel tubing", "Rubber straps", "Steel plates",
-                "Trailer axle", "Wheels and tires", "Trailer hitch coupler", "Safety chains",
-                "Electrical wires", "Trailer signal lights", "Wheel chock", "Tie-down rings",
-                "Steel bars", "Steel hitch ball", "Steel mounting plate"));
-        materials.sort(String.CASE_INSENSITIVE_ORDER);
-        for (String material : materials) {
-            rawMaterials.put(material, 50);
-        }
+        finishedGoods.clear();
+        rawMaterials.clear();
     }
 
     private void initializeBOM() {
@@ -2527,6 +3716,8 @@ public class TowHitchSystemPure {
     }
 
     private void loadInventory() throws IOException {
+        finishedGoods.clear();
+        rawMaterials.clear();
         if (!Files.exists(DATA_FILE)) {
             saveInventory();
             return;
@@ -2544,9 +3735,15 @@ public class TowHitchSystemPure {
                     System.err.println("Ignoring malformed inventory data at line " + lineNumber + ".");
                     continue;
                 }
+                String itemName = fields[1].trim();
+                if (itemName.isEmpty() || itemName.indexOf('\t') >= 0
+                        || itemName.indexOf('\n') >= 0 || itemName.indexOf('\r') >= 0) {
+                    System.err.println("Ignoring invalid inventory item at line " + lineNumber + ".");
+                    continue;
+                }
                 Map<String, Integer> inventory = "F".equals(fields[0]) ? finishedGoods : rawMaterials;
-                if (!inventory.containsKey(fields[1])) {
-                    System.err.println("Ignoring unknown inventory item at line " + lineNumber + ".");
+                if (containsItemIgnoreCase(inventory, itemName)) {
+                    System.err.println("Ignoring duplicate inventory item at line " + lineNumber + ".");
                     continue;
                 }
                 try {
@@ -2555,32 +3752,60 @@ public class TowHitchSystemPure {
                         System.err.println("Ignoring negative quantity at line " + lineNumber + ".");
                         continue;
                     }
-                    inventory.put(fields[1], quantity);
+                    inventory.put(itemName, quantity);
                 } catch (NumberFormatException e) {
                     System.err.println("Ignoring invalid quantity at line " + lineNumber + ".");
                 }
             }
         }
+        for (String product : finishedGoods.keySet()) {
+            billOfMaterials.putIfAbsent(product, Collections.emptyList());
+            productExpansionMap.putIfAbsent(product, Boolean.FALSE);
+        }
     }
 
     private void saveInventory() throws IOException {
+        Map<String, Integer> persistedFinishedGoods = getPersistedFinishedGoodsSnapshot();
+        saveInventorySnapshot(persistedFinishedGoods, rawMaterials);
+    }
+
+    private Map<String, Integer> getPersistedFinishedGoodsSnapshot() {
+        Map<String, Integer> persistedFinishedGoods = new LinkedHashMap<>();
+        for (Map.Entry<String, Integer> item : finishedGoods.entrySet()) {
+            long openingBalance = productionOpeningBalances.getOrDefault(
+                    item.getKey(), item.getValue());
+            long lifetimeUnits = lifetimeProductionUnits.getOrDefault(item.getKey(), 0L);
+            long persistedQuantity = openingBalance > Long.MAX_VALUE - lifetimeUnits
+                    ? Long.MAX_VALUE : openingBalance + lifetimeUnits;
+            persistedFinishedGoods.put(item.getKey(),
+                    (int) Math.min(Integer.MAX_VALUE, persistedQuantity));
+        }
+        return persistedFinishedGoods;
+    }
+
+    private void saveInventorySnapshot(Map<String, Integer> finishedSnapshot,
+            Map<String, Integer> rawSnapshot) throws IOException {
         Path absoluteDataFile = DATA_FILE.toAbsolutePath();
         Path parent = absoluteDataFile.getParent();
+        Files.createDirectories(parent);
         Path temporaryFile = Files.createTempFile(parent, "inventory_data", ".tmp");
         boolean moved = false;
         try {
             try (BufferedWriter writer = Files.newBufferedWriter(temporaryFile, StandardCharsets.UTF_8)) {
                 writer.write("# Tow Hitch by 5-21 inventory data. Do not edit while the program is running.");
                 writer.newLine();
-                for (Map.Entry<String, Integer> item : finishedGoods.entrySet()) {
+                for (Map.Entry<String, Integer> item : finishedSnapshot.entrySet()) {
                     writer.write("F\t" + item.getKey() + "\t" + item.getValue());
                     writer.newLine();
                 }
-                for (Map.Entry<String, Integer> item : rawMaterials.entrySet()) {
-                    writer.write("R\t" + item.getKey() + "\t" + item.getValue());
+                List<String> materialNames = new ArrayList<>(rawSnapshot.keySet());
+                materialNames.sort(String.CASE_INSENSITIVE_ORDER);
+                for (String materialName : materialNames) {
+                    writer.write("R\t" + materialName + "\t" + rawSnapshot.get(materialName));
                     writer.newLine();
                 }
             }
+
             try {
                 Files.move(temporaryFile, absoluteDataFile, StandardCopyOption.REPLACE_EXISTING,
                         StandardCopyOption.ATOMIC_MOVE);
@@ -2593,6 +3818,381 @@ public class TowHitchSystemPure {
                 Files.deleteIfExists(temporaryFile);
             }
         }
+    }
+
+    private boolean containsItemIgnoreCase(Map<String, Integer> catalog, String candidate) {
+        for (String itemName : catalog.keySet()) {
+            if (itemName.equalsIgnoreCase(candidate)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void enterStockToolbarMode() {
+        stockFooterMode = StockFooterMode.TOOLBAR;
+        showPage("Stocks");
+        stockSaveStatus.setForeground(theme.secondaryText());
+        stockSaveStatus.setText("Use a Stocks header icon to add, edit, or delete materials.");
+        applicationRoot.repaint();
+    }
+
+    private void beginMaterialAddition() {
+        MaterialDraft draft = new MaterialDraft();
+        pendingMaterialDrafts.add(0, draft);
+        attachStockTextUndo(draft.nameField);
+        attachStockTextUndo(draft.quantityField);
+        stockFooterMode = StockFooterMode.ADD;
+        pushStockActionUndo(() -> {
+            pendingMaterialDrafts.remove(draft);
+            stockFooterMode = StockFooterMode.TOOLBAR;
+            showPage("Stocks");
+        });
+        showPage("Stocks");
+        stockSaveStatus.setForeground(theme.secondaryText());
+        stockSaveStatus.setText("Enter the material name and quantity, then select Add.");
+        draft.nameField.requestFocusInWindow();
+        applicationRoot.repaint();
+    }
+
+    private boolean stageActiveMaterialAddition() {
+        if (pendingMaterialDrafts.isEmpty()) {
+            showCatalogError("There is no new material row to add.");
+            return false;
+        }
+        MaterialDraft draft = pendingMaterialDrafts.get(0);
+        String name = draft.nameField.getText().trim();
+        if (name.isEmpty() || name.indexOf('\t') >= 0
+                || name.indexOf('\n') >= 0 || name.indexOf('\r') >= 0) {
+            showCatalogError("Enter a material name without tabs or line breaks.");
+            draft.nameField.requestFocusInWindow();
+            return false;
+        }
+        if (containsItemIgnoreCase(rawMaterials, name)
+                || containsItemIgnoreCase(stagedMaterialAdditions, name)) {
+            showCatalogError("A material with the name \"" + name + "\" already exists.");
+            draft.nameField.requestFocusInWindow();
+            return false;
+        }
+        final int quantity;
+        try {
+            quantity = Integer.parseInt(draft.quantityField.getText().trim());
+        } catch (NumberFormatException e) {
+            showCatalogError("Enter a whole number from 0 to " + Integer.MAX_VALUE + ".");
+            draft.quantityField.requestFocusInWindow();
+            return false;
+        }
+        if (quantity < 0) {
+            showCatalogError("Stock quantity cannot be negative.");
+            draft.quantityField.requestFocusInWindow();
+            return false;
+        }
+
+        stagedMaterialAdditions.put(name, quantity);
+        pendingMaterialDrafts.remove(draft);
+        stockFooterMode = StockFooterMode.TOOLBAR;
+        pushStockActionUndo(() -> {
+            stagedMaterialAdditions.remove(name);
+            pendingMaterialDrafts.add(0, draft);
+            stockFooterMode = StockFooterMode.ADD;
+            showPage("Stocks");
+        });
+        return true;
+    }
+
+    private void attachStockTextUndo(JTextField field) {
+        field.getDocument().addUndoableEditListener(stockTextUndoManager);
+        field.getDocument().addDocumentListener(new DocumentListener() {
+            private void updateUndoAvailability() {
+                if (stockUndoButton != null) {
+                    stockUndoButton.setEnabled(stockTextUndoManager.canUndo()
+                            || !stockActionUndoHistory.isEmpty());
+                }
+            }
+
+            @Override
+            public void insertUpdate(DocumentEvent event) {
+                updateUndoAvailability();
+            }
+
+            @Override
+            public void removeUpdate(DocumentEvent event) {
+                updateUndoAvailability();
+            }
+
+            @Override
+            public void changedUpdate(DocumentEvent event) {
+                updateUndoAvailability();
+            }
+        });
+    }
+
+    private void pushStockActionUndo(Runnable undoAction) {
+        stockActionUndoHistory.add(undoAction);
+        if (stockUndoButton != null) {
+            stockUndoButton.setEnabled(true);
+        }
+    }
+
+    private void undoStockAction() {
+        if (stockTextUndoManager.canUndo()) {
+            stockTextUndoManager.undo();
+        } else if (!stockActionUndoHistory.isEmpty()) {
+            Runnable undoAction = stockActionUndoHistory.remove(stockActionUndoHistory.size() - 1);
+            undoAction.run();
+        }
+        if (stockUndoButton != null) {
+            stockUndoButton.setEnabled(stockTextUndoManager.canUndo()
+                    || !stockActionUndoHistory.isEmpty());
+        }
+        applicationRoot.repaint();
+    }
+
+    private void beginMaterialDeletion() {
+        stockFooterMode = StockFooterMode.DELETE;
+        showPage("Stocks");
+        stockSaveStatus.setForeground(theme.secondaryText());
+        stockSaveStatus.setText("Select materials to delete, then select Save.");
+        applicationRoot.repaint();
+    }
+
+    private void beginMaterialNameEdit() {
+        if (materialNameEdits.isEmpty()) {
+            for (String materialName : rawMaterials.keySet()) {
+                JTextField nameField = new JTextField(materialName, 24);
+                attachStockTextUndo(nameField);
+                materialNameEdits.put(materialName, nameField);
+            }
+        }
+        stockFooterMode = StockFooterMode.EDIT_NAMES;
+        showPage("Stocks");
+        stockSaveStatus.setForeground(theme.secondaryText());
+        stockSaveStatus.setText("Edit material names, then select Save.");
+        applicationRoot.repaint();
+        if (!rawMaterials.isEmpty()) {
+            JTextField firstNameField =
+                    materialNameEdits.get(rawMaterials.keySet().iterator().next());
+            SwingUtilities.invokeLater(() -> {
+                firstNameField.requestFocusInWindow();
+                firstNameField.setCaretPosition(firstNameField.getText().length());
+            });
+        }
+    }
+
+    private void cancelStockFooterMode() {
+        pendingStockUpdates.clear();
+        pendingMaterialDrafts.clear();
+        stagedMaterialAdditions.clear();
+        materialNameEdits.clear();
+        selectedMaterialsForDeletion.clear();
+        stockTextUndoManager.discardAllEdits();
+        stockActionUndoHistory.clear();
+        stockFooterMode = StockFooterMode.NORMAL;
+        stockUndoButton = null;
+        updateNotificationBadge();
+        showPage("Stocks");
+        stockSaveStatus.setForeground(theme.secondaryText());
+        stockSaveStatus.setText(" ");
+        applicationRoot.repaint();
+    }
+
+    private void addCatalogItem(boolean product) {
+        Map<String, Integer> catalog = product ? finishedGoods : rawMaterials;
+        if (!product && !pendingStockUpdates.isEmpty() && !resolvePendingStockUpdates()) {
+            return;
+        }
+        String itemName = showAddCatalogItemDialog(product);
+        if (itemName == null) {
+            return;
+        }
+        itemName = itemName.trim();
+        if (itemName.isEmpty() || itemName.indexOf('\t') >= 0
+                || itemName.indexOf('\n') >= 0 || itemName.indexOf('\r') >= 0) {
+            showCatalogError("Enter a name that does not contain tabs or line breaks.");
+            return;
+        }
+        if (containsItemIgnoreCase(catalog, itemName)) {
+            showCatalogError("An item with that name already exists.");
+            return;
+        }
+
+        try {
+            appendInventoryRecord(product ? "F" : "R", itemName, 0);
+        } catch (IOException e) {
+            showCatalogError("Unable to add the item to inventory_data.txt:\n" + e.getMessage());
+            return;
+        }
+        catalog.put(itemName, 0);
+        if (product) {
+            billOfMaterials.putIfAbsent(itemName, Collections.emptyList());
+            productExpansionMap.put(itemName, Boolean.FALSE);
+        }
+        updateNotificationBadge();
+        showPage(product ? "Production" : "Stocks");
+        applicationRoot.repaint();
+    }
+
+    private void deleteCatalogItem(boolean product) {
+        Map<String, Integer> catalog = product ? finishedGoods : rawMaterials;
+        if (catalog.isEmpty()) {
+            showCatalogError(product ? "There are no products to delete."
+                    : "There are no materials to delete.");
+            return;
+        }
+        if (!product && !pendingStockUpdates.isEmpty() && !resolvePendingStockUpdates()) {
+            return;
+        }
+        String itemName = showDeleteCatalogItemDialog(
+                product ? "Delete Product" : "Delete Material", catalog);
+        if (itemName == null || !catalog.containsKey(itemName)) {
+            return;
+        }
+
+        Integer removedQuantity = catalog.remove(itemName);
+        Integer removedPendingQuantity = pendingStockUpdates.remove(itemName);
+        Boolean previousExpansion = product ? productExpansionMap.remove(itemName) : null;
+        try {
+            saveInventory();
+        } catch (IOException e) {
+            catalog.put(itemName, removedQuantity);
+            if (removedPendingQuantity != null) {
+                pendingStockUpdates.put(itemName, removedPendingQuantity);
+            }
+            if (previousExpansion != null) {
+                productExpansionMap.put(itemName, previousExpansion);
+            }
+            showCatalogError("Unable to delete the item from inventory_data.txt:\n" + e.getMessage());
+            return;
+        }
+        updateNotificationBadge();
+        showPage(product ? "Production" : "Stocks");
+        applicationRoot.repaint();
+    }
+
+    private String showAddCatalogItemDialog(boolean product) {
+        String itemType = product ? "product" : "material";
+        JDialog dialog = createThemedDialog(product ? "Add New Product" : "Add New Material");
+        RoundedPanel card = createDialogCard();
+        card.setLayout(new BorderLayout(0, 18));
+        JLabel heading = new JLabel(product ? "Create a product profile" : "Add a raw material",
+                SwingConstants.CENTER);
+        heading.setFont(new Font("SansSerif", Font.BOLD, 18));
+        heading.setForeground(theme.text());
+        card.add(heading, BorderLayout.NORTH);
+
+        RoundedPanel fieldShell = new RoundedPanel(12);
+        fieldShell.setBackground(theme.input());
+        fieldShell.setLayout(new BorderLayout());
+        RoundedTextField nameField = new RoundedTextField("Enter " + itemType + " name", 24);
+        nameField.setPreferredSize(new Dimension(360, 46));
+        fieldShell.add(nameField, BorderLayout.CENTER);
+        card.add(fieldShell, BorderLayout.CENTER);
+
+        String[] result = {null};
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 0));
+        buttons.setOpaque(false);
+        RoundedButton confirmButton = new RoundedButton(
+                "Add", theme.primaryButton(), Color.WHITE, 9);
+        confirmButton.setFont(new Font("SansSerif", Font.BOLD, 14));
+        confirmButton.setPreferredSize(new Dimension(108, 40));
+        confirmButton.addActionListener(event -> {
+            if (!nameField.getText().trim().isEmpty()) {
+                result[0] = nameField.getText().trim();
+                dialog.dispose();
+            }
+        });
+        RoundedButton cancelButton = new RoundedButton(
+                "Cancel", theme.input(), theme.text(), 9);
+        cancelButton.setFont(new Font("SansSerif", Font.BOLD, 14));
+        cancelButton.setPreferredSize(new Dimension(108, 40));
+        cancelButton.addActionListener(event -> dialog.dispose());
+        nameField.addActionListener(event -> confirmButton.doClick());
+        buttons.add(confirmButton);
+        buttons.add(cancelButton);
+        card.add(buttons, BorderLayout.SOUTH);
+        dialog.setContentPane(card);
+        configureFocusablePanels(card);
+        dialog.getRootPane().setDefaultButton(confirmButton);
+        dialog.pack();
+        dialog.setMinimumSize(new Dimension(440, 190));
+        dialog.setLocationRelativeTo(frame);
+        dialog.setVisible(true);
+        return result[0];
+    }
+
+    private String showDeleteCatalogItemDialog(String title, Map<String, Integer> catalog) {
+        List<String> itemNames = new ArrayList<>(catalog.keySet());
+        itemNames.sort(String.CASE_INSENSITIVE_ORDER);
+        JDialog dialog = createThemedDialog(title);
+        RoundedPanel card = createDialogCard();
+        card.setLayout(new BorderLayout(0, 18));
+        JLabel heading = new JLabel("Select an item to remove", SwingConstants.CENTER);
+        heading.setFont(new Font("SansSerif", Font.BOLD, 18));
+        heading.setForeground(theme.text());
+        card.add(heading, BorderLayout.NORTH);
+
+        JComboBox<String> itemSelector = new JComboBox<>(itemNames.toArray(new String[0]));
+        itemSelector.setFont(BODY_FONT);
+        itemSelector.setForeground(theme.text());
+        itemSelector.setBackground(theme.input());
+        card.add(itemSelector, BorderLayout.CENTER);
+        String[] result = {null};
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.CENTER, 10, 0));
+        buttons.setOpaque(false);
+        RoundedButton deleteButton = new RoundedButton(
+                "Delete", theme.danger(), Color.WHITE, 9);
+        deleteButton.setFont(new Font("SansSerif", Font.BOLD, 14));
+        deleteButton.setPreferredSize(new Dimension(108, 40));
+        deleteButton.addActionListener(event -> {
+            result[0] = (String) itemSelector.getSelectedItem();
+            dialog.dispose();
+        });
+        RoundedButton cancelButton = new RoundedButton(
+                "Cancel", theme.input(), theme.text(), 9);
+        cancelButton.setFont(new Font("SansSerif", Font.BOLD, 14));
+        cancelButton.setPreferredSize(new Dimension(108, 40));
+        cancelButton.addActionListener(event -> dialog.dispose());
+        buttons.add(deleteButton);
+        buttons.add(cancelButton);
+        card.add(buttons, BorderLayout.SOUTH);
+        dialog.setContentPane(card);
+        configureFocusablePanels(card);
+        dialog.pack();
+        dialog.setMinimumSize(new Dimension(400, 180));
+        dialog.setLocationRelativeTo(frame);
+        dialog.setVisible(true);
+        return result[0];
+    }
+
+    private void showCatalogError(String message) {
+        JOptionPane.showMessageDialog(frame, message, "Inventory Management Error",
+                JOptionPane.ERROR_MESSAGE);
+    }
+
+    private void appendInventoryRecord(String type, String itemName, int quantity)
+            throws IOException {
+        Path absoluteDataFile = DATA_FILE.toAbsolutePath();
+        Path parent = absoluteDataFile.getParent();
+        Files.createDirectories(parent);
+        if (Files.notExists(absoluteDataFile)) {
+            Files.createFile(absoluteDataFile);
+        }
+        long fileSize = Files.size(absoluteDataFile);
+        boolean needsLineBreak = false;
+        if (fileSize > 0) {
+            try (SeekableByteChannel channel = Files.newByteChannel(absoluteDataFile,
+                    StandardOpenOption.READ)) {
+                channel.position(fileSize - 1);
+                ByteBuffer lastByte = ByteBuffer.allocate(1);
+                channel.read(lastByte);
+                lastByte.flip();
+                needsLineBreak = lastByte.get() != (byte) '\n';
+            }
+        }
+        String record = (needsLineBreak ? System.lineSeparator() : "")
+                + type + "\t" + itemName + "\t" + quantity + System.lineSeparator();
+        Files.write(absoluteDataFile, record.getBytes(StandardCharsets.UTF_8),
+                StandardOpenOption.WRITE, StandardOpenOption.APPEND);
     }
 
     private ImageIcon loadImageAsset(String assetName) {
@@ -3075,7 +4675,9 @@ public class TowHitchSystemPure {
                 placeholderGraphics.setFont(getFont());
                 placeholderGraphics.setColor(theme.isDark()
                         ? new Color(0x5D5954) : theme.secondaryText());
-                placeholderGraphics.drawString(placeholder, getInsets().left,
+                Insets margin = getMargin();
+                int leftPadding = getInsets().left + (margin == null ? 0 : margin.left);
+                placeholderGraphics.drawString(placeholder, leftPadding,
                         (getHeight() + getFont().getSize()) / 2 - 2);
                 placeholderGraphics.dispose();
             }
@@ -3187,6 +4789,133 @@ public class TowHitchSystemPure {
         }
     }
 
+    private enum StockFooterMode {
+        NORMAL,
+        TOOLBAR,
+        ADD,
+        DELETE,
+        EDIT_NAMES
+    }
+
+    private enum ProductCatalogMode {
+        NORMAL,
+        TOOLBAR,
+        ADD,
+        DELETE,
+        EDIT_NAMES
+    }
+
+    private enum StockHeaderAction {
+        ADD,
+        EDIT,
+        DELETE
+    }
+
+    private final class StockActionIconButton extends JButton {
+        private static final long serialVersionUID = 1L;
+        private final StockHeaderAction action;
+
+        private StockActionIconButton(StockHeaderAction action) {
+            this.action = action;
+            setToolTipText(null);
+            setOpaque(false);
+            setContentAreaFilled(false);
+            setBorderPainted(false);
+            setFocusPainted(false);
+            setPreferredSize(new Dimension(28, 28));
+            setMinimumSize(new Dimension(28, 28));
+            setMaximumSize(new Dimension(28, 28));
+            setCursor(new java.awt.Cursor(java.awt.Cursor.HAND_CURSOR));
+        }
+
+        @Override
+        protected void paintComponent(Graphics graphics) {
+            Graphics2D g = (Graphics2D) graphics.create();
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON);
+            g.setColor(getModel().isRollover() ? theme.primaryButton() : theme.secondaryText());
+            g.setStroke(new java.awt.BasicStroke(1.8f,
+                    java.awt.BasicStroke.CAP_ROUND, java.awt.BasicStroke.JOIN_ROUND));
+            int centerX = getWidth() / 2;
+            int centerY = getHeight() / 2;
+            if (action == StockHeaderAction.ADD) {
+                g.drawLine(centerX - 6, centerY, centerX + 6, centerY);
+                g.drawLine(centerX, centerY - 6, centerX, centerY + 6);
+            } else if (action == StockHeaderAction.EDIT) {
+                Graphics2D pencil = (Graphics2D) g.create();
+                pencil.translate(centerX, centerY);
+                pencil.rotate(Math.PI / 4.0);
+                pencil.setColor(new Color(0x5B5753));
+                java.awt.geom.Path2D.Double pencilShape = new java.awt.geom.Path2D.Double();
+                pencilShape.moveTo(-2.5, -7);
+                pencilShape.lineTo(2.5, -7);
+                pencilShape.lineTo(2.5, 6);
+                pencilShape.lineTo(0, 10);
+                pencilShape.lineTo(-2.5, 6);
+                pencilShape.closePath();
+                pencil.fill(pencilShape);
+                pencil.fillRect(-2, -10, 4, 3);
+                pencil.dispose();
+            } else {
+                g.drawLine(centerX - 7, centerY - 6, centerX + 7, centerY - 6);
+                g.drawLine(centerX - 3, centerY - 9, centerX + 3, centerY - 9);
+                g.drawLine(centerX - 5, centerY - 4, centerX - 4, centerY + 8);
+                g.drawLine(centerX + 5, centerY - 4, centerX + 4, centerY + 8);
+                g.drawLine(centerX - 4, centerY + 8, centerX + 4, centerY + 8);
+                g.drawLine(centerX - 2, centerY - 2, centerX - 2, centerY + 5);
+                g.drawLine(centerX + 2, centerY - 2, centerX + 2, centerY + 5);
+            }
+            g.dispose();
+        }
+    }
+
+    private final class MaterialDraft {
+        private final JTextField nameField = new JTextField("", 24);
+        private final JTextField quantityField = new JTextField("0", 5);
+    }
+
+    private final class ProductDraft {
+        private final JTextField nameField = new JTextField("", 24);
+    }
+
+    private final class SelectionCircleButton extends JToggleButton {
+        private static final long serialVersionUID = 1L;
+
+        private SelectionCircleButton() {
+            setOpaque(false);
+            setContentAreaFilled(false);
+            setBorderPainted(false);
+            setFocusPainted(false);
+            setPreferredSize(new Dimension(24, 24));
+            setMinimumSize(new Dimension(24, 24));
+            setMaximumSize(new Dimension(24, 24));
+            setCursor(new java.awt.Cursor(java.awt.Cursor.HAND_CURSOR));
+        }
+
+        @Override
+        protected void paintComponent(Graphics graphics) {
+            Graphics2D g = (Graphics2D) graphics.create();
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+            int diameter = Math.min(getWidth(), getHeight()) - 10;
+            int x = (getWidth() - diameter) / 2;
+            int y = (getHeight() - diameter) / 2;
+            g.setColor(isSelected() ? theme.primaryButton() : theme.secondaryText());
+            g.setStroke(new java.awt.BasicStroke(1.5f));
+            if (isSelected()) {
+                g.fillOval(x, y, diameter, diameter);
+                g.setColor(Color.WHITE);
+                g.setStroke(new java.awt.BasicStroke(1.8f,
+                        java.awt.BasicStroke.CAP_ROUND, java.awt.BasicStroke.JOIN_ROUND));
+                g.drawLine(x + 5, y + diameter / 2, x + diameter / 2 - 1, y + diameter - 6);
+                g.drawLine(x + diameter / 2 - 1, y + diameter - 6,
+                        x + diameter - 4, y + 5);
+            } else {
+                g.drawOval(x, y, diameter, diameter);
+            }
+            g.dispose();
+        }
+    }
+
     private static final class BOMItem {
         private final String materialName;
         private final int quantityRequired;
@@ -3206,6 +4935,18 @@ public class TowHitchSystemPure {
             this.itemText = itemText;
             this.date = date;
             this.time = time;
+        }
+    }
+
+    private static final class ProductionBatch {
+        private final Instant producedAt;
+        private final String productName;
+        private final int quantity;
+
+        private ProductionBatch(Instant producedAt, String productName, int quantity) {
+            this.producedAt = producedAt;
+            this.productName = productName;
+            this.quantity = quantity;
         }
     }
 

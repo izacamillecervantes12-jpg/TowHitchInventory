@@ -1,0 +1,5 @@
+2026-11-11T05:41:16.155584500Z	Hitch Ball Assembly	Steel hitch ball	1
+2026-11-11T05:41:16.155584500Z	Hitch Ball Assembly	Steel mounting plate	1
+2026-11-11T05:41:16.155584500Z	Hitch Ball Assembly	Bolts	2
+2026-11-11T05:41:16.155584500Z	Hitch Ball Assembly	Nuts	2
+2026-11-11T05:41:16.155584500Z	Hitch Ball Assembly	Washers	2
