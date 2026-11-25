@@ -1,0 +1,3 @@
+owner	owner123	Shop Owner	OWNER
+staff	staff123	Production Staff	STAFF
+customer	cust123	Walk-in Client	CUSTOMER
