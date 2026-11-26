@@ -16,3 +16,59 @@
 [2026-11-11 13:41] Consumed for Hitch Ball Assembly: Steel hitch ball (1), Steel mounting plate (1), Bolts (2), Nuts (2), Washers (2)
 2026-11-25 20:28	Adjusted material: Bolts to Qty: 47
 2026-11-25 20:28	Adjusted material: Bolts to Qty: 46
+2026-11-26 00:17	Requested restock: 80 Mild steel plates - Requested by Production Staff
+2026-11-26 00:18	Requested restock: 90 Mild steel plates - Requested by Production Staff
+2026-11-26 00:19	Approved stock request: 20 Bolts requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 00:19	Approved stock request: 10 Paint requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 00:19	Approved stock request: 80 Mild steel plates requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 00:19	Approved stock request: 90 Mild steel plates requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 01:42	Requested restock: 80 Square steel tubing - Requested by Production Staff
+2026-11-26 02:01	Requested restock: 100 Square steel tubing - Requested by Production Staff
+2026-11-26 02:01	Requested restock: 100 Steel flat bars - Requested by Production Staff
+2026-11-26 02:15	Approved stock request: 100 Steel flat bars requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 02:15	Approved stock request: 100 Square steel tubing requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 02:15	Approved stock request: 80 Square steel tubing requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 02:31	Requested restock: 100 Steel rods - Requested by Production Staff
+2026-11-26 02:32	Requested restock: 90 Bolts - Requested by Production Staff
+2026-11-26 02:32	Requested restock: 100 Nuts - Requested by Production Staff
+2026-11-26 02:32	Requested restock: 100 Washers - Requested by Production Staff
+2026-11-26 02:32	Requested restock: 150 Welding rods - Requested by Production Staff
+2026-11-26 02:32	Requested restock: 100 Metal primer - Requested by Production Staff
+2026-11-26 02:32	Requested restock: 90 Paint - Requested by Production Staff
+2026-11-26 02:32	Requested restock: 80 Round steel tubing - Requested by Production Staff
+2026-11-26 02:42	Requested restock: 100 Expanded metal mesh - Requested by Production Staff
+2026-11-26 02:42	Requested restock: 80 Wheel chock - Requested by Production Staff
+2026-11-26 02:42	Requested restock: 40 Trailer hitch coupler - Requested by Production Staff
+2026-11-26 02:43	Requested restock: 150 Steel flat bars - Requested by Production Staff
+2026-11-26 02:43	Requested restock: 50 Mild steel plates - Requested by Production Staff
+2026-11-26 02:43	Requested restock: 30 Square steel tubing - Requested by Production Staff
+2026-11-26 02:43	Requested restock: 80 Steel mounting plate - Requested by Production Staff
+2026-11-26 10:21	Requested restock: 100 Rubber straps - Requested by Camille
+2026-11-26 10:33	Requested restock: 100 Tie-down rings - Requested by Camille
+2026-11-26 10:33	Requested restock: 50 Safety chains - Requested by Camille
+2026-11-26 10:33	Requested restock: 80 Steel bars - Requested by Camille
+2026-11-26 10:33	Requested restock: 90 Steel hitch ball - Requested by Camille
+2026-11-26 10:33	Requested restock: 70 Electrical wires - Requested by Camille
+2026-11-26 10:33	Requested restock: 50 Trailer signal lights - Requested by Camille
+2026-11-26 10:33	Requested restock: 20 Steel plates - Requested by Camille
+2026-11-26 10:33	Requested restock: 20 Wheels and tires - Requested by Camille
+2026-11-26 10:34	Requested restock: 40 Trailer axle - Requested by Camille
+2026-11-26 10:39	Approved stock request: 100 Steel rods requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 10:39	Approved stock request: 90 Bolts requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 10:39	Approved stock request: 100 Nuts requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 10:39	Approved stock request: 100 Washers requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 10:39	Approved stock request: 150 Welding rods requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 10:39	Approved stock request: 100 Metal primer requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 10:39	Approved stock request: 90 Paint requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 10:39	Approved stock request: 100 Expanded metal mesh requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 10:39	Approved stock request: 80 Round steel tubing requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 10:39	Approved stock request: 80 Wheel chock requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 10:39	Approved stock request: 150 Steel flat bars requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 10:39	Approved stock request: 40 Trailer hitch coupler requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 10:39	Approved stock request: 50 Mild steel plates requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 10:39	Approved stock request: 30 Square steel tubing requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 10:39	Approved stock request: 80 Steel mounting plate requested by Production Staff - Approved by Owner Shop Owner
+2026-11-26 10:40	Approved stock request: 40 Trailer axle requested by Camille - Approved by Owner Shop Owner
+2026-11-26 10:40	Approved stock request: 100 Rubber straps requested by Camille - Approved by Owner Shop Owner
+2026-11-26 10:40	Approved stock request: 100 Tie-down rings requested by Camille - Approved by Owner Shop Owner
+2026-11-26 10:40	Approved stock request: 50 Safety chains requested by Camille - Approved by Owner Shop Owner

@@ -14,18 +14,23 @@ import java.awt.GridLayout;
 import java.awt.Image;
 import java.awt.Insets;
 import java.awt.RenderingHints;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.io.IOException;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.ImageIcon;
 import javax.swing.JButton;
+import javax.swing.JCheckBox;
 import javax.swing.JComponent;
 import javax.swing.JDialog;
 import javax.swing.JFrame;
@@ -36,16 +41,14 @@ import javax.swing.JPanel;
 import javax.swing.JPasswordField;
 import javax.swing.JPopupMenu;
 import javax.swing.JScrollPane;
-import javax.swing.JSpinner;
 import javax.swing.JTextField;
-import javax.swing.SpinnerNumberModel;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 
 public class CustomerApp {
-    private static final Color GREEN = new Color(0x16A34A);
-    private static final Color RED = new Color(0xDC2626);
+    private static final Color GREEN = new Color(0x2E6F40);
+    private static final Color RED = new Color(0xA63A3A);
     private static final DateTimeFormatter TIMESTAMP =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
@@ -62,13 +65,26 @@ public class CustomerApp {
     private JFrame frame;
     private TowHitchCore.UserAccount activeUser;
     private JPanel pageHost;
+    private JPanel sidebarPanel;
+    private TowHitchCore.FlatIconButton headerMenuButton;
+    private JPanel topBar;
+    private Timer sidebarAnimation;
+    private int sidebarWidth = 255;
     private String currentPage = "Order Catalog";
     private String searchText = "";
+    private boolean sidebarVisible = true;
+    private boolean compactView;
+    private boolean notificationAlerts = true;
+    private boolean autoRefreshInventory = true;
     private JLabel loginTitle;
     private JLabel loginSubtitle;
     private JLabel loginMessage;
     private JLabel loginFooter;
-    private JPopupMenu notificationPopup;
+    private javax.swing.JWindow notificationPopup;
+    private javax.swing.JWindow profilePopup;
+    private TowHitchCore.AnchoredPopover anchoredPopover;
+    private TowHitchCore.FlatIconButton notificationButton;
+    private final Set<String> readNotificationIds = new HashSet<>();
 
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> new CustomerApp().start());
@@ -89,6 +105,8 @@ public class CustomerApp {
         frame.setMinimumSize(new Dimension(1000, 670));
         frame.setSize(1240, 800);
         frame.setLocationRelativeTo(null);
+        anchoredPopover = new TowHitchCore.AnchoredPopover(frame);
+        TowHitchCore.installGlobalMouseHandling();
         showLogin();
         frame.setVisible(true);
     }
@@ -97,34 +115,38 @@ public class CustomerApp {
         LoginBackgroundPanel root = new LoginBackgroundPanel();
         GlassLoginCard card = new GlassLoginCard();
         card.setLayout(new BoxLayout(card, BoxLayout.Y_AXIS));
-        card.setBorder(BorderFactory.createEmptyBorder(18, 61, 16, 61));
+        card.setBorder(BorderFactory.createEmptyBorder(36, 36, 32, 36));
         JPanel content = new JPanel(new GridBagLayout());
         content.setOpaque(false);
         JLabel logo = new JLabel(loginLogo, SwingConstants.CENTER);
         logo.setPreferredSize(new Dimension(64, 64));
-        loginRow(content, logo, 0, 0, 5);
-        loginTitle = loginHeading("Welcome", 34, true);
-        loginRow(content, loginTitle, 1, 0, 4);
-        loginSubtitle = loginHeading("Browse and order tow hitch products", 17, false);
-        loginRow(content, loginSubtitle, 2, 0, 8);
+        loginRow(content, logo, 0, 0, 12);
+        loginTitle = loginHeading("Welcome, Customer", 34, true);
+        loginRow(content, loginTitle, 1, 0, 6);
+        loginSubtitle = loginHeading(
+                "Browse and order tow hitch products and accessories.", 15, false);
+        loginRow(content, loginSubtitle, 2, 0, 26);
 
         JTextField username = loginTextField();
         JPasswordField password = loginPasswordField();
-        loginRow(content, loginLabel("Username"), 3, 10, 4);
-        loginRow(content, username, 4, 0, 10);
-        loginRow(content, loginLabel("Password"), 5, 0, 4);
-        loginRow(content, password, 6, 0, 7);
+        loginRow(content, loginLabel("Username"), 3, 0, 6);
+        loginRow(content, username, 4, 0, 16);
+        loginRow(content, loginLabel("Password"), 5, 0, 6);
+        loginRow(content, password, 6, 0, 24);
         loginMessage = loginHeading(" ", 12, false);
         loginMessage.setForeground(theme.danger());
+        loginMessage.setVisible(false);
         loginRow(content, loginMessage, 7, 0, 6);
 
         TowHitchCore.RoundedButton signIn = new TowHitchCore.RoundedButton(
                 "Log in", theme.primaryButton(), Color.WHITE, 12, theme);
         signIn.setFont(new Font("SansSerif", Font.BOLD, 14));
-        signIn.setPreferredSize(new Dimension(394, 50));
+        signIn.setPreferredSize(new Dimension(395, 44));
+        signIn.setMinimumSize(new Dimension(395, 44));
+        signIn.setMaximumSize(new Dimension(395, 44));
         signIn.addActionListener(event -> authenticate(username, password));
         password.addActionListener(event -> authenticate(username, password));
-        loginRow(content, signIn, 8, 8, 4);
+        loginRow(content, signIn, 8, 0, 14);
 
         JButton signup = new JButton("Create Customer Account (Sign Up)");
         signup.setFont(new Font("SansSerif", Font.BOLD, 13));
@@ -135,26 +157,62 @@ public class CustomerApp {
         signup.setFocusPainted(false);
         signup.setCursor(new java.awt.Cursor(java.awt.Cursor.HAND_CURSOR));
         signup.addActionListener(event -> openSignUpDialog());
-        loginRow(content, signup, 9, 8, 2);
-        content.setPreferredSize(new Dimension(394, content.getPreferredSize().height));
-        card.add(Box.createVerticalGlue());
-        card.add(content);
+        signup.setAlignmentX(JComponent.CENTER_ALIGNMENT);
+        loginRow(content, signup, 9, 0, 0);
+        content.setPreferredSize(new Dimension(395, content.getPreferredSize().height));
+        JPanel centeredContent = centerLoginContent(content);
+        card.add(centeredContent);
         loginFooter = loginHeading("Tow Hitch by 5-21 | Customer Portal", 16, false);
-        card.add(Box.createVerticalGlue());
+        loginFooter.setHorizontalAlignment(SwingConstants.CENTER);
+        loginFooter.setAlignmentX(JComponent.CENTER_ALIGNMENT);
+        loginFooter.setPreferredSize(new Dimension(394, 42));
+        loginFooter.setMaximumSize(new Dimension(394, 42));
+        card.add(Box.createVerticalStrut(24));
         card.add(loginFooter);
-        card.setPreferredSize(new Dimension(516, 610));
+        card.setPreferredSize(new Dimension(468,
+                centeredContent.getPreferredSize().height + 24 + 42 + 36 + 32));
         root.setContent(card, new ThemeSwitchButton());
         frame.setContentPane(root);
         frame.revalidate();
         frame.repaint();
     }
 
+    private JPanel centerLoginContent(JPanel content) {
+        Dimension contentSize = new Dimension(395, content.getPreferredSize().height);
+        content.setPreferredSize(contentSize);
+        content.setMinimumSize(contentSize);
+        content.setMaximumSize(contentSize);
+        JPanel wrapper = new JPanel(new GridBagLayout());
+        wrapper.setOpaque(false);
+        wrapper.setAlignmentX(JComponent.CENTER_ALIGNMENT);
+        GridBagConstraints constraints = new GridBagConstraints();
+        constraints.gridx = 0;
+        constraints.gridy = 0;
+        constraints.weightx = 1.0;
+        constraints.anchor = GridBagConstraints.CENTER;
+        wrapper.add(content, constraints);
+        Dimension wrapperSize = new Dimension(396, contentSize.height);
+        wrapper.setPreferredSize(wrapperSize);
+        wrapper.setMinimumSize(wrapperSize);
+        wrapper.setMaximumSize(wrapperSize);
+        return wrapper;
+    }
+
     private void loginRow(JPanel panel, Component component, int row, int top, int bottom) {
         GridBagConstraints c = new GridBagConstraints();
         c.gridx = 0;
         c.gridy = row;
-        c.weightx = 1;
-        c.fill = GridBagConstraints.HORIZONTAL;
+        boolean formLabel = component instanceof JLabel
+                && ((JLabel) component).getHorizontalAlignment() == SwingConstants.LEFT;
+        boolean fixedControl = component instanceof JTextField
+                || component instanceof JPasswordField
+                || component instanceof JButton
+                        && component.getPreferredSize().width == 395;
+        c.weightx = fixedControl || formLabel ? 0 : 1;
+        c.fill = fixedControl || formLabel
+                ? GridBagConstraints.NONE : GridBagConstraints.HORIZONTAL;
+        c.anchor = fixedControl || formLabel
+                ? GridBagConstraints.WEST : GridBagConstraints.CENTER;
         c.insets = new Insets(top, 0, bottom, 0);
         panel.add(component, c);
     }
@@ -169,6 +227,9 @@ public class CustomerApp {
     private JLabel loginLabel(String text) {
         JLabel label = loginHeading(text, 21, true);
         label.setHorizontalAlignment(SwingConstants.LEFT);
+        label.setPreferredSize(new Dimension(395, 27));
+        label.setMinimumSize(new Dimension(395, 27));
+        label.setMaximumSize(new Dimension(395, 27));
         return label;
     }
 
@@ -187,7 +248,7 @@ public class CustomerApp {
             for (TowHitchCore.UserAccount user : TowHitchCore.loadUsers()) {
                 if (user.username.equals(name) && user.password.equals(secret)) {
                     if (!"CUSTOMER".equals(user.role)) {
-                        loginMessage.setText("<html><div style='width:380px;text-align:center'>"
+                        showLoginMessage("<html><div style='width:380px;text-align:center'>"
                                 + "Access denied: This portal is restricted to Customer accounts only."
                                 + "</div></html>");
                         return;
@@ -198,10 +259,23 @@ public class CustomerApp {
                     return;
                 }
             }
-            loginMessage.setText("Invalid username or password.");
+            showLoginMessage("Invalid username or password.");
         } catch (IOException e) {
-            loginMessage.setText("Unable to read users.txt: " + e.getMessage());
+            showLoginMessage("Unable to read users.txt: " + e.getMessage());
         }
+    }
+
+    private void showLoginMessage(String message) {
+        loginMessage.setText(message);
+        loginMessage.setVisible(message != null && !message.trim().isEmpty());
+        java.awt.Container card = SwingUtilities.getAncestorOfClass(GlassLoginCard.class,
+                loginMessage);
+        if (card != null) {
+            card.setPreferredSize(new Dimension(468,
+                    card.getLayout().preferredLayoutSize(card).height));
+        }
+        loginMessage.getParent().revalidate();
+        loginMessage.getParent().repaint();
     }
 
     private void openSignUpDialog() {
@@ -261,18 +335,27 @@ public class CustomerApp {
 
     private void buildApplication() {
         JPanel root = new GradientPanel();
-        root.setLayout(new BorderLayout(16, 0));
-        root.setBorder(BorderFactory.createEmptyBorder(14, 14, 14, 14));
-        root.add(buildSidebar(), BorderLayout.WEST);
-        JPanel main = new JPanel(new BorderLayout(0, 14));
-        main.setOpaque(false);
-        main.add(buildTopBar(), BorderLayout.NORTH);
+        root.setLayout(new BorderLayout());
+        root.setBorder(BorderFactory.createEmptyBorder());
+        sidebarPanel = buildSidebar();
+        sidebarPanel.setPreferredSize(new Dimension(sidebarVisible ? sidebarWidth : 0, 100));
+        sidebarPanel.setVisible(sidebarVisible || sidebarWidth > 0);
         pageHost = new JPanel(new CardLayout());
         pageHost.setOpaque(false);
         pageHost.add(buildCatalogPage(), "Order Catalog");
         pageHost.add(buildMyOrdersPage(), "My Orders");
-        main.add(pageHost, BorderLayout.CENTER);
-        root.add(main, BorderLayout.CENTER);
+        root.add(sidebarPanel, BorderLayout.WEST);
+        JPanel content = new JPanel(new BorderLayout());
+        content.setOpaque(false);
+        content.add(buildTopBar(), BorderLayout.NORTH);
+        JPanel pageContent = new JPanel(new BorderLayout());
+        pageContent.setOpaque(false);
+        pageContent.setBorder(compactView
+                ? BorderFactory.createEmptyBorder(14, 18, 14, 18)
+                : BorderFactory.createEmptyBorder(24, 28, 24, 28));
+        pageContent.add(pageHost, BorderLayout.CENTER);
+        content.add(pageContent, BorderLayout.CENTER);
+        root.add(content, BorderLayout.CENTER);
         frame.setContentPane(root);
         ((CardLayout) pageHost.getLayout()).show(pageHost, currentPage);
         frame.revalidate();
@@ -280,28 +363,43 @@ public class CustomerApp {
     }
 
     private JPanel buildSidebar() {
-        TowHitchCore.RoundedPanel sidebar = new TowHitchCore.RoundedPanel(24);
-        sidebar.setPreferredSize(new Dimension(220, 100));
+        TowHitchCore.RoundedPanel sidebar = new TowHitchCore.RoundedPanel(0);
+        sidebar.setPreferredSize(new Dimension(255, 100));
         sidebar.setBackground(theme.sidebar());
-        sidebar.setBorder(BorderFactory.createEmptyBorder(22, 16, 18, 16));
-        sidebar.setLayout(new BorderLayout(0, 18));
-        JPanel upper = new JPanel(new BorderLayout(0, 22));
+        sidebar.setBorder(BorderFactory.createEmptyBorder(0, 0, 18, 0));
+        sidebar.setLayout(new BorderLayout(0, 0));
+        JPanel upper = new JPanel(new BorderLayout());
         upper.setOpaque(false);
-        ImageIcon logo = theme.isDark() ? sidebarLogoDark : sidebarLogoLight;
-        if (logo != null) {
-            JLabel brand = new JLabel(TowHitchCore.scaleToFitIcon(logo, 172, 112));
-            brand.setHorizontalAlignment(SwingConstants.CENTER);
-            upper.add(brand, BorderLayout.NORTH);
+        ImageIcon brandLogo = theme.isDark() ? sidebarLogoDark : sidebarLogoLight;
+        JPanel logoHero = new JPanel(new GridBagLayout());
+        logoHero.setOpaque(false);
+        logoHero.setBorder(BorderFactory.createEmptyBorder(36, 16, 36, 16));
+        logoHero.setPreferredSize(new Dimension(255, 202));
+        logoHero.setMinimumSize(new Dimension(255, 202));
+        logoHero.setMaximumSize(new Dimension(Integer.MAX_VALUE, 202));
+        if (brandLogo != null) {
+            JLabel logo = new JLabel(TowHitchCore.loadScaledImageAssetFit(
+                    theme.isDark() ? "sidebar_logo_dark.png" : "sidebar_logo_light.png",
+                    210, 130));
+            logo.setHorizontalAlignment(SwingConstants.CENTER);
+            logoHero.add(logo);
         }
-        JPanel nav = new JPanel(new GridLayout(0, 1, 0, 8));
+        upper.add(logoHero, BorderLayout.NORTH);
+        JPanel nav = new JPanel();
         nav.setOpaque(false);
+        nav.setBorder(BorderFactory.createEmptyBorder(0, 12, 0, 12));
+        nav.setLayout(new BoxLayout(nav, BoxLayout.Y_AXIS));
+        nav.setAlignmentX(Component.LEFT_ALIGNMENT);
         for (String page : new String[] {"Order Catalog", "My Orders"}) {
             boolean selected = page.equals(currentPage);
             Color foreground = selected ? Color.WHITE : theme.secondaryText();
             TowHitchCore.RoundedButton button = new TowHitchCore.RoundedButton(page,
                     selected ? theme.primaryButton() : theme.sidebar(), foreground, 12, theme);
             button.setFont(new Font("SansSerif", selected ? Font.BOLD : Font.PLAIN, 14));
-            button.setPreferredSize(new Dimension(184, 42));
+            button.setPreferredSize(new Dimension(231, 42));
+            button.setMaximumSize(new Dimension(Integer.MAX_VALUE, 42));
+            button.setMargin(new Insets(6, 14, 6, 14));
+            button.setAlignmentX(Component.LEFT_ALIGNMENT);
             button.setHorizontalAlignment(SwingConstants.LEFT);
             ImageIcon icon = "Order Catalog".equals(page) ? inventoryIcon : dashboardIcon;
             if (icon != null) {
@@ -310,12 +408,21 @@ public class CustomerApp {
             }
             button.addActionListener(event -> navigate(page));
             nav.add(button);
+            nav.add(Box.createVerticalStrut(6));
         }
+        nav.setAlignmentX(Component.LEFT_ALIGNMENT);
         upper.add(nav, BorderLayout.CENTER);
         sidebar.add(upper, BorderLayout.CENTER);
         TowHitchCore.RoundedButton logout = new TowHitchCore.RoundedButton(
                 "Logout", theme.sidebar(), theme.secondaryText(), 12, theme);
         logout.setPreferredSize(new Dimension(184, 42));
+        logout.setMaximumSize(new Dimension(Integer.MAX_VALUE, 42));
+        logout.setMargin(new Insets(6, 14, 6, 14));
+        logout.setIcon(TowHitchCore.loadTintedIcon("logout_icon.png", 18,
+                theme.isDark() ? new Color(0xD1D5DB) : new Color(0x374151)));
+        logout.setIconTextGap(7);
+        logout.setHorizontalAlignment(SwingConstants.CENTER);
+        logout.setAlignmentX(Component.CENTER_ALIGNMENT);
         logout.addActionListener(event -> {
             activeUser = null;
             currentPage = "Order Catalog";
@@ -323,7 +430,9 @@ public class CustomerApp {
         });
         JPanel logoutHolder = new JPanel(new GridBagLayout());
         logoutHolder.setOpaque(false);
-        logoutHolder.add(logout);
+        GridBagConstraints logoutConstraints = new GridBagConstraints();
+        logoutConstraints.anchor = GridBagConstraints.CENTER;
+        logoutHolder.add(logout, logoutConstraints);
         sidebar.add(logoutHolder, BorderLayout.SOUTH);
         return sidebar;
     }
@@ -333,21 +442,72 @@ public class CustomerApp {
         buildApplication();
     }
 
+    private void toggleSidebar() {
+        sidebarVisible = !sidebarVisible;
+        if (sidebarPanel == null) {
+            return;
+        }
+        sidebarPanel.setVisible(true);
+        if (sidebarAnimation != null) {
+            sidebarAnimation.stop();
+        }
+        int target = sidebarVisible ? 255 : 0;
+        topBar.revalidate();
+        topBar.repaint();
+        sidebarAnimation = new Timer(15, event -> {
+            int difference = target - sidebarWidth;
+            if (Math.abs(difference) <= 2) {
+                sidebarWidth = target;
+                sidebarPanel.setPreferredSize(new Dimension(sidebarWidth, 100));
+                sidebarPanel.setVisible(sidebarWidth > 0);
+                topBar.revalidate();
+                topBar.repaint();
+                sidebarPanel.getParent().revalidate();
+                sidebarPanel.getParent().repaint();
+                sidebarAnimation.stop();
+                return;
+            }
+            sidebarWidth += difference / 4;
+            if (sidebarWidth == 0 && target > 0) {
+                sidebarWidth = 1;
+            }
+            sidebarPanel.setPreferredSize(new Dimension(sidebarWidth, 100));
+            sidebarPanel.getParent().revalidate();
+            sidebarPanel.getParent().repaint();
+        });
+        sidebarAnimation.start();
+    }
+
     private JPanel buildTopBar() {
-        TowHitchCore.RoundedPanel top = new TowHitchCore.RoundedPanel(20);
+        TowHitchCore.RoundedPanel top = new TowHitchCore.RoundedPanel(0);
         top.setBackground(theme.panel());
-        top.setLayout(new BorderLayout(12, 0));
-        top.setBorder(BorderFactory.createEmptyBorder(12, 18, 12, 18));
-        JPanel searchArea = new JPanel(new BorderLayout(10, 0));
-        searchArea.setOpaque(false);
-        TowHitchCore.FlatIconButton menu = new TowHitchCore.FlatIconButton("\u2630", "Navigation", theme);
-        menu.setIconButtonSize(30);
-        menu.addActionListener(event -> navigate("Order Catalog"));
-        searchArea.add(menu, BorderLayout.WEST);
+        top.setLayout(new GridBagLayout());
+        top.setBorder(BorderFactory.createEmptyBorder(0, 12, 0, 12));
+        top.setPreferredSize(new Dimension(100, 56));
+        top.setMinimumSize(new Dimension(100, 56));
+        GridBagConstraints constraints = new GridBagConstraints();
+        constraints.gridy = 0;
+        constraints.anchor = GridBagConstraints.CENTER;
+        constraints.insets = new Insets(0, 6, 0, 6);
+        headerMenuButton = new TowHitchCore.FlatIconButton("\u2630", "Navigation", theme);
+        headerMenuButton.setIconButtonSize(32);
+        headerMenuButton.setFont(new Font("SansSerif", Font.PLAIN, 15));
+        headerMenuButton.addActionListener(event -> toggleSidebar());
+        constraints.gridx = 0;
+        constraints.weightx = 0;
+        constraints.fill = GridBagConstraints.NONE;
+        top.add(headerMenuButton, constraints);
+
         RoundedSearchPanel searchPanel = new RoundedSearchPanel();
         searchPanel.setLayout(new BorderLayout());
-        searchPanel.setPreferredSize(new Dimension(360, 42));
-        TowHitchCore.RoundedTextField search = new TowHitchCore.RoundedTextField("Search products", 24, theme);
+        searchPanel.setPreferredSize(new Dimension(360, 32));
+        searchPanel.setMinimumSize(new Dimension(220, 32));
+        searchPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 32));
+        TowHitchCore.RoundedTextField search = new TowHitchCore.RoundedTextField(
+                "Search", 28, theme);
+        search.setPreferredSize(new Dimension(220, 32));
+        search.setMinimumSize(new Dimension(100, 32));
+        search.setMaximumSize(new Dimension(Integer.MAX_VALUE, 32));
         search.setText(searchText);
         search.setOpaque(false);
         search.addActionListener(event -> {
@@ -356,33 +516,32 @@ public class CustomerApp {
         });
         searchPanel.add(buildSearchLeading(), BorderLayout.WEST);
         searchPanel.add(search, BorderLayout.CENTER);
-        searchArea.add(searchPanel, BorderLayout.CENTER);
-        top.add(searchArea, BorderLayout.CENTER);
-        JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 14, 0));
-        actions.setOpaque(false);
-        JLabel role = new JLabel("CUSTOMER \u2022 " + activeUser.fullName);
-        role.setFont(new Font("SansSerif", Font.BOLD, 12));
-        role.setForeground(theme.success());
-        actions.add(role);
-        actions.add(new ThemeSwitchButton());
-        TowHitchCore.FlatIconButton bell = new TowHitchCore.FlatIconButton(
-                TowHitchCore.loadTintedIcon(notificationIcon, 24, theme.text()),
-                "Low-stock notifications", theme);
-        bell.setIconButtonSize(24);
-        bell.setUnreadCount(lowStockCount());
-        bell.addActionListener(event -> showNotifications(bell));
-        TowHitchCore.FlatIconButton settings = new TowHitchCore.FlatIconButton(
-                TowHitchCore.loadTintedIcon(settingsIcon, 24, theme.text()), "Settings", theme);
-        settings.setIconButtonSize(24);
-        settings.addActionListener(event -> showSettings(settings));
-        actions.add(bell);
-        actions.add(settings);
-        top.add(actions, BorderLayout.EAST);
+        constraints.gridx = 1;
+        constraints.weightx = 1;
+        constraints.fill = GridBagConstraints.HORIZONTAL;
+        top.add(searchPanel, constraints);
+
+        notificationButton = new TowHitchCore.FlatIconButton(
+                TowHitchCore.loadTintedIcon(notificationIcon, 18, theme.text()),
+                "Notifications", theme);
+        notificationButton.setIconButtonSize(24);
+        notificationButton.setUnreadCount(notificationAlerts ? unreadNotificationCount() : 0);
+        notificationButton.addActionListener(event -> showNotifications(notificationButton));
+        constraints.gridx = 2;
+        constraints.weightx = 0;
+        constraints.fill = GridBagConstraints.NONE;
+        top.add(notificationButton, constraints);
+        TowHitchCore.ProfileButton profile = new TowHitchCore.ProfileButton(theme);
+        profile.addActionListener(event -> showProfileMenu(profile));
+        constraints.gridx = 3;
+        top.add(profile, constraints);
+        topBar = top;
         return top;
     }
 
     private JPanel buildCatalogPage() {
-        JPanel page = pageShell("Order Catalog", "Browse finished goods available from Tow Hitch by 5-21.");
+        JPanel page = pageShell("Order Catalog",
+                "Available tow hitch products and accessories with live stock status for ordering.");
         JPanel rows = verticalPanel();
         try {
             List<TowHitchCore.InventoryItem> inventory = TowHitchCore.loadInventory();
@@ -398,14 +557,17 @@ public class CustomerApp {
         } catch (IOException e) {
             showDataError("Unable to load finished goods", e);
         }
-        page.add(scroll(rows), BorderLayout.CENTER);
+        page.add(sectionContainer(scroll(rows)), BorderLayout.CENTER);
         return page;
     }
 
     private JPanel productCard(TowHitchCore.InventoryItem item) {
         TowHitchCore.RoundedPanel card = new TowHitchCore.RoundedPanel(16);
-        card.setBackground(theme.panel());
-        card.setBorder(BorderFactory.createEmptyBorder(17, 18, 17, 18));
+        card.setBackground(theme.isDark() ? new Color(0x252832) : Color.WHITE);
+        card.setBorder(BorderFactory.createCompoundBorder(
+                new TowHitchCore.RoundedBorder(theme.isDark()
+                        ? new Color(0x383C45) : new Color(0xECEAE4), 16),
+                BorderFactory.createEmptyBorder(17, 18, 17, 18)));
         card.setLayout(new BorderLayout(12, 0));
         long reserved = pendingForProduct(item.itemName);
         int maxOrderable = (int) Math.max(0L, (long) item.quantity - reserved);
@@ -430,10 +592,10 @@ public class CustomerApp {
             JLabel out = textLabel("Out of Stock", 12, true, theme.danger());
             controls.add(out);
         } else {
-            JSpinner quantity = new JSpinner(new SpinnerNumberModel(1, 1,
-                    Math.max(1, maxOrderable), 1));
+            TowHitchCore.RoundedBorder.QuantityStepper quantity =
+                    new TowHitchCore.RoundedBorder.QuantityStepper(1, 1,
+                            Math.max(1, maxOrderable), theme);
             quantity.setEnabled(maxOrderable > 0);
-            quantity.setPreferredSize(new Dimension(72, 36));
             controls.add(quantity);
             TowHitchCore.RoundedButton order = actionButton("Place Order",
                     theme.primaryButton(), Color.WHITE);
@@ -449,8 +611,15 @@ public class CustomerApp {
         return card;
     }
 
-    private void placeOrder(TowHitchCore.InventoryItem product, JSpinner quantity) {
-        int requested = ((Number) quantity.getValue()).intValue();
+    private void placeOrder(TowHitchCore.InventoryItem product,
+                            TowHitchCore.RoundedBorder.QuantityStepper quantity) {
+        int requested;
+        try {
+            requested = quantity.getValue();
+        } catch (IllegalArgumentException e) {
+            error(e.getMessage());
+            return;
+        }
         if (requested < 1 || requested > product.quantity) {
             error("Order quantity must be between 1 and available stock.");
             return;
@@ -493,11 +662,12 @@ public class CustomerApp {
     }
 
     private JPanel buildMyOrdersPage() {
-        JPanel page = pageShell("My Orders", "Track and manage your order requests.");
+        JPanel page = pageShell("My Orders",
+                "Personal order history showing real-time fulfillment status and pending order management.");
         JPanel list = new JPanel(new BorderLayout(0, 7));
         list.setOpaque(false);
         double[] weights = {.14, .18, .18, .07, .16, .27};
-        list.add(tableHeader(new String[] {"Status", "Order ID", "Product", "Qty", "Order Date", "Action"},
+        list.add(tableHeader(new String[] {"Status", "Order ID", "Product", "Qty", "Order Date", ""},
                 weights), BorderLayout.NORTH);
         JPanel rows = verticalPanel();
         try {
@@ -516,7 +686,7 @@ public class CustomerApp {
             showDataError("Unable to load your orders", e);
         }
         list.add(scroll(rows), BorderLayout.CENTER);
-        page.add(list, BorderLayout.CENTER);
+        page.add(sectionContainer(list), BorderLayout.CENTER);
         return page;
     }
 
@@ -524,13 +694,14 @@ public class CustomerApp {
         JPanel row = rowPanel();
         addCell(row, new TowHitchCore.StatusPillBadge(order.status, theme), 0, weights[0]);
         addCell(row, tableCell(order.orderId), 1, weights[1]);
-        addCell(row, tableCell(order.productName), 2, weights[2]);
+        addCell(row, tableNameCell(order.productName), 2, weights[2]);
         addCell(row, tableCell(Integer.toString(order.quantity)), 3, weights[3]);
-        addCell(row, tableCell(order.timestamp), 4, weights[4]);
+        addCell(row, tableCell(TowHitchCore.formatSmartDate(order.timestamp)), 4, weights[4]);
         JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
         actions.setOpaque(false);
         if ("PENDING".equals(order.status)) {
-            TowHitchCore.RoundedButton cancel = actionButton("Cancel", RED, Color.WHITE);
+            TowHitchCore.RoundedButton cancel = actionButton(
+                    "Cancel", RED, new Color(0xFAF8F5));
             cancel.addActionListener(event -> cancelOwnOrder(order));
             actions.add(cancel);
         }
@@ -601,9 +772,13 @@ public class CustomerApp {
     }
 
     private JPanel tableHeader(String[] labels, double[] weights) {
-        JPanel header = new JPanel(new GridBagLayout());
-        header.setBackground(theme.sidebar());
-        header.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+        JPanel header = new TowHitchCore.RoundedPanel(12);
+        header.setLayout(new GridBagLayout());
+        header.setBackground(theme.isDark() ? new Color(0x1E2026) : Color.WHITE);
+        header.setBorder(BorderFactory.createCompoundBorder(
+                new TowHitchCore.RoundedBorder(theme.isDark()
+                        ? new Color(0x383C45) : new Color(0xECEAE4), 12),
+                BorderFactory.createEmptyBorder(10, 10, 10, 10)));
         for (int i = 0; i < labels.length; i++) {
             JLabel label = tableCell(labels[i]);
             label.setFont(new Font("SansSerif", Font.BOLD, 11));
@@ -615,9 +790,12 @@ public class CustomerApp {
 
     private JPanel rowPanel() {
         JPanel row = new TowHitchCore.RoundedPanel(12);
-        row.setBackground(theme.row());
+        row.setBackground(theme.isDark() ? new Color(0x252832) : Color.WHITE);
         row.setLayout(new GridBagLayout());
-        row.setBorder(BorderFactory.createEmptyBorder(7, 10, 7, 10));
+        row.setBorder(BorderFactory.createCompoundBorder(
+                new TowHitchCore.RoundedBorder(theme.isDark()
+                        ? new Color(0x383C45) : new Color(0xECEAE4), 12),
+                BorderFactory.createEmptyBorder(7, 10, 7, 10)));
         return row;
     }
 
@@ -638,6 +816,12 @@ public class CustomerApp {
         return label;
     }
 
+    private JLabel tableNameCell(String text) {
+        JLabel label = textLabel(text, 12, true, theme.text());
+        label.setToolTipText(text);
+        return label;
+    }
+
     private JLabel textLabel(String text, int size, boolean bold, Color color) {
         JLabel label = new JLabel(text);
         label.setFont(new Font("SansSerif", bold ? Font.BOLD : Font.PLAIN, size));
@@ -652,6 +836,12 @@ public class CustomerApp {
         return panel;
     }
 
+    private JPanel sectionContainer(Component content) {
+        TowHitchCore.RoundedPanel section = TowHitchCore.createSectionPanel(theme);
+        section.add(content, BorderLayout.CENTER);
+        return section;
+    }
+
     private JScrollPane scroll(Component component) {
         JScrollPane pane = new JScrollPane(component);
         pane.setBorder(BorderFactory.createEmptyBorder());
@@ -660,6 +850,7 @@ public class CustomerApp {
         pane.getVerticalScrollBar().setUI(new TowHitchCore.MinimalScrollBarUI(theme));
         pane.getHorizontalScrollBar().setUI(new TowHitchCore.MinimalScrollBarUI(theme));
         pane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        TowHitchCore.configureSmoothScroll(pane);
         return pane;
     }
 
@@ -673,15 +864,43 @@ public class CustomerApp {
 
     private JDialog themedDialog(String title, int width, int height) {
         JDialog dialog = new JDialog(frame, title, true);
+        dialog.setUndecorated(true);
+        dialog.setBackground(new Color(0, 0, 0, 0));
         dialog.setSize(width, height);
         dialog.setLocationRelativeTo(frame);
-        dialog.getContentPane().setBackground(theme.workspaceCanvas());
-        dialog.setLayout(new BorderLayout(0, 10));
-        JPanel heading = new JPanel(new BorderLayout());
+        TowHitchCore.RoundedPanel surface = new TowHitchCore.RoundedPanel(20);
+        surface.setBackground(theme.panel());
+        surface.setBorder(BorderFactory.createCompoundBorder(
+                new TowHitchCore.RoundedBorder.RoundedShadowBorder(theme.isDark()
+                        ? new Color(0x383C45) : new Color(0xDCD8CE), 20),
+                BorderFactory.createEmptyBorder(8, 10, 10, 10)));
+        surface.setLayout(new BorderLayout(0, 10));
+        JPanel heading = new JPanel(new BorderLayout(8, 0));
         heading.setOpaque(false);
-        heading.setBorder(BorderFactory.createEmptyBorder(16, 18, 0, 18));
+        heading.setBorder(BorderFactory.createEmptyBorder(4, 8, 0, 8));
         heading.add(textLabel(title, 18, true, theme.text()));
-        dialog.add(heading, BorderLayout.NORTH);
+        JButton close = new JButton("\u2715");
+        close.setFocusable(false);
+        close.setContentAreaFilled(false);
+        close.setBorderPainted(false);
+        close.setForeground(theme.secondaryText());
+        close.addActionListener(event -> dialog.dispose());
+        heading.add(close, BorderLayout.EAST);
+        surface.add(heading, BorderLayout.NORTH);
+        java.awt.event.MouseAdapter drag = new java.awt.event.MouseAdapter() {
+            private java.awt.Point origin;
+            @Override public void mousePressed(java.awt.event.MouseEvent event) {
+                origin = event.getPoint();
+            }
+            @Override public void mouseDragged(java.awt.event.MouseEvent event) {
+                java.awt.Point location = dialog.getLocation();
+                dialog.setLocation(location.x + event.getX() - origin.x,
+                        location.y + event.getY() - origin.y);
+            }
+        };
+        heading.addMouseListener(drag);
+        heading.addMouseMotionListener(drag);
+        dialog.setContentPane(surface);
         return dialog;
     }
 
@@ -694,12 +913,15 @@ public class CustomerApp {
 
     private JTextField dialogField(String value) {
         JTextField field = new JTextField(value);
+        TowHitchCore.configureTextField(field);
         field.setFont(new Font("SansSerif", Font.PLAIN, 14));
         field.setForeground(theme.text());
         field.setBackground(theme.input());
-        field.setBorder(BorderFactory.createCompoundBorder(BorderFactory.createLineBorder(theme.row()),
+        field.setBorder(BorderFactory.createCompoundBorder(
+                new TowHitchCore.RoundedBorder(theme.row(), 10),
                 BorderFactory.createEmptyBorder(8, 10, 8, 10)));
-        field.setPreferredSize(new Dimension(230, 38));
+        field.setPreferredSize(new Dimension(value != null && value.matches("\\d+")
+                ? 120 : 230, 38));
         return field;
     }
 
@@ -708,7 +930,8 @@ public class CustomerApp {
         field.setFont(new Font("SansSerif", Font.PLAIN, 14));
         field.setForeground(theme.text());
         field.setBackground(theme.input());
-        field.setBorder(BorderFactory.createCompoundBorder(BorderFactory.createLineBorder(theme.row()),
+        field.setBorder(BorderFactory.createCompoundBorder(
+                new TowHitchCore.RoundedBorder(theme.row(), 10),
                 BorderFactory.createEmptyBorder(8, 10, 8, 10)));
         field.setPreferredSize(new Dimension(230, 38));
         return field;
@@ -750,71 +973,400 @@ public class CustomerApp {
         return LocalDateTime.now().format(TIMESTAMP);
     }
 
-    private int lowStockCount() {
-        try {
-            int count = 0;
-            for (TowHitchCore.InventoryItem item : TowHitchCore.loadInventory()) {
-                if (item.quantity <= item.minAlert) count++;
+    private void showNotifications(Component invoker) {
+        if (notificationPopup != null && notificationPopup.isVisible()) {
+            anchoredPopover.close();
+            return;
+        }
+        javax.swing.JWindow popup = new javax.swing.JWindow(frame);
+        popup.setBackground(new Color(0, 0, 0, 0));
+        JPanel content = verticalPanel();
+        List<TowHitchCore.SystemNotification> feed = loadNotifications();
+        JPanel heading = new JPanel(new BorderLayout(10, 0));
+        heading.setOpaque(false);
+        heading.setBorder(BorderFactory.createEmptyBorder(4, 8, 8, 8));
+        heading.add(textLabel("Notifications", 15, true, theme.text()), BorderLayout.WEST);
+        JButton markAll = notificationLink("Mark all as read");
+        heading.add(markAll, BorderLayout.EAST);
+        content.add(heading);
+
+        JPanel items = verticalPanel();
+        JPanel headerDivider = new JPanel();
+        headerDivider.setOpaque(true);
+        headerDivider.setBackground(theme.isDark()
+                ? new Color(0x32363F) : new Color(0xECEAE4));
+        headerDivider.setPreferredSize(new Dimension(1, 1));
+        headerDivider.setMaximumSize(new Dimension(Integer.MAX_VALUE, 1));
+        items.add(headerDivider);
+        List<JPanel> cards = new ArrayList<>();
+        List<JLabel> dots = new ArrayList<>();
+        List<JLabel> labels = new ArrayList<>();
+        for (int notificationIndex = 0; notificationIndex < feed.size(); notificationIndex++) {
+            TowHitchCore.SystemNotification notification = feed.get(notificationIndex);
+            TowHitchCore.RoundedPanel card = new TowHitchCore.RoundedPanel(12);
+            card.setLayout(new BorderLayout(9, 0));
+            card.setOpaque(true);
+            card.setBorder(BorderFactory.createCompoundBorder(
+                    new TowHitchCore.RoundedBorder(theme.isDark()
+                            ? new Color(0x32363F) : new Color(0xECEAE4), 12),
+                    BorderFactory.createEmptyBorder(10, 14, 10, 14)));
+            JLabel dot = textLabel("\u25CF", 8, true, notification.indicatorColor);
+            String notificationHtml = notification.text.startsWith("<html>")
+                    ? "<html><div style='width:340px'>"
+                            + notification.text.substring(6, notification.text.length() - 7)
+                            + "</div></html>" : notification.text;
+            JLabel label = new JLabel(notificationHtml);
+            label.setOpaque(false);
+            label.setCursor(new java.awt.Cursor(java.awt.Cursor.HAND_CURSOR));
+            label.setFont(new Font("SansSerif", Font.PLAIN, 13));
+            label.setToolTipText(notification.text);
+            card.add(dot, BorderLayout.WEST);
+            card.add(label, BorderLayout.CENTER);
+            styleNotificationCard(notification, card, dot, label);
+            card.setMaximumSize(new Dimension(Integer.MAX_VALUE, 100));
+            MouseAdapter click = new MouseAdapter() {
+                @Override
+                public void mouseClicked(MouseEvent event) {
+                    readNotificationIds.add(notificationReadKey(notification));
+                    styleNotificationCard(notification, card, dot, label);
+                    ((TowHitchCore.FlatIconButton) invoker)
+                            .setUnreadCount(notificationAlerts
+                                    ? countUnreadNotifications(feed) : 0);
+                }
+            };
+            card.addMouseListener(click);
+            dot.addMouseListener(click);
+            label.addMouseListener(click);
+            cards.add(card);
+            dots.add(dot);
+            labels.add(label);
+            items.add(Box.createVerticalStrut(4));
+            items.add(card);
+            JPanel divider = new JPanel();
+            divider.setOpaque(true);
+            divider.setBackground(theme.isDark()
+                    ? new Color(0x32363F) : new Color(0xECEAE4));
+            divider.setPreferredSize(new Dimension(1, 1));
+            divider.setMaximumSize(new Dimension(Integer.MAX_VALUE, 1));
+            items.add(divider);
+        }
+        if (feed.isEmpty()) items.add(textLabel("You're all caught up.", 13,
+                false, theme.secondaryText()));
+        markAll.addActionListener(event -> {
+            for (TowHitchCore.SystemNotification notification : feed) {
+                readNotificationIds.add(notificationReadKey(notification));
             }
-            return count;
+            for (int i = 0; i < feed.size(); i++) {
+                styleNotificationCard(feed.get(i), cards.get(i), dots.get(i), labels.get(i));
+            }
+            ((TowHitchCore.FlatIconButton) invoker).setUnreadCount(0);
+        });
+        JScrollPane pane = scroll(items);
+        pane.setPreferredSize(new Dimension(420,
+                Math.min(360, Math.max(90, feed.size() * 62 + 20))));
+        content.add(pane);
+        TowHitchCore.RoundedPanel popover = new TowHitchCore.RoundedPanel(18);
+        popover.setBackground(theme.isDark() ? new Color(0x1E2026) : Color.WHITE);
+        popover.setLayout(new BorderLayout());
+        popover.setBorder(BorderFactory.createCompoundBorder(
+                new TowHitchCore.RoundedBorder.RoundedShadowBorder(theme.isDark()
+                        ? new Color(0x383C45) : new Color(0xDCD8CE), 18),
+                BorderFactory.createEmptyBorder(8, 8, 8, 8)));
+        popover.add(content, BorderLayout.CENTER);
+        popup.setContentPane(popover);
+        popup.pack();
+        notificationPopup = popup;
+        anchoredPopover.show(invoker, popup, true);
+    }
+
+    private JButton notificationLink(String text) {
+        JButton button = new JButton(text);
+        button.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        button.setForeground(theme.accent());
+        button.setOpaque(false);
+        button.setContentAreaFilled(false);
+        button.setBorderPainted(false);
+        button.setFocusPainted(false);
+        button.setCursor(new java.awt.Cursor(java.awt.Cursor.HAND_CURSOR));
+        return button;
+    }
+
+    private List<TowHitchCore.SystemNotification> loadNotifications() {
+        try {
+            return TowHitchCore.loadSystemNotifications("CUSTOMER", activeUser.fullName);
         } catch (IOException e) {
-            showDataError("Unable to load inventory alerts", e);
-            return 0;
+            showDataError("Unable to load system notifications", e);
+            return new ArrayList<>();
         }
     }
 
-    private void showNotifications(Component invoker) {
-        if (notificationPopup != null && notificationPopup.isVisible()) {
-            notificationPopup.setVisible(false);
-            return;
+    private int countUnreadNotifications(List<TowHitchCore.SystemNotification> feed) {
+        int unread = 0;
+        for (TowHitchCore.SystemNotification notification : feed) {
+            if (!readNotificationIds.contains(notificationReadKey(notification))) unread++;
         }
-        JPopupMenu popup = new RoundedPopup();
-        JPanel content = verticalPanel();
-        JPanel title = new JPanel(new FlowLayout(FlowLayout.LEFT, 7, 4));
-        title.setOpaque(false);
-        title.add(textLabel("\u25CF", 14, true, theme.danger()));
-        title.add(textLabel("Low Stocks Alert", 14, true, theme.text()));
-        content.add(title);
-        int count = 0;
-        try {
-            for (TowHitchCore.InventoryItem item : TowHitchCore.loadInventory()) {
-                if (item.quantity <= item.minAlert) {
-                    JPanel row = new TowHitchCore.RoundedPanel(10);
-                    row.setBackground(theme.row());
-                    row.setBorder(BorderFactory.createEmptyBorder(7, 9, 7, 9));
-                    row.setLayout(new BorderLayout(8, 0));
-                    row.add(textLabel(item.itemName + " \u2022 "
-                            + ("F".equals(item.type) ? "Finished Goods" : "Unfinished Goods"),
-                            12, true, theme.text()), BorderLayout.CENTER);
-                    row.add(textLabel(item.quantity + " on hand (min alert: " + item.minAlert + ")",
-                            11, true, theme.danger()), BorderLayout.EAST);
-                    row.setMaximumSize(new Dimension(380, 44));
-                    content.add(row);
-                    content.add(Box.createVerticalStrut(4));
-                    count++;
-                }
-            }
-        } catch (IOException e) {
-            showDataError("Unable to load low-stock notifications", e);
-        }
-        if (count == 0) content.add(textLabel("No low-stock items.", 12, false, theme.success()));
-        JScrollPane pane = scroll(content);
-        pane.setPreferredSize(new Dimension(390, Math.min(300, Math.max(70, count * 50 + 45))));
-        popup.add(pane);
-        notificationPopup = popup;
-        popup.show(invoker, 0, invoker.getHeight());
+        return unread;
+    }
+
+    private int unreadNotificationCount() {
+        return countUnreadNotifications(loadNotifications());
+    }
+
+    private String notificationReadKey(TowHitchCore.SystemNotification notification) {
+        return activeUser.username + "\t" + notification.id;
+    }
+
+    private void styleNotificationCard(TowHitchCore.SystemNotification notification,
+                                       JPanel card, JLabel dot, JLabel label) {
+        boolean unread = !readNotificationIds.contains(notificationReadKey(notification));
+        card.setBackground(unread
+                ? (theme.isDark() ? new Color(0x282B33) : new Color(0xF7F5F0))
+                : (theme.isDark() ? new Color(0x1E2026) : Color.WHITE));
+        label.setFont(new Font("SansSerif", Font.PLAIN, 13));
+        label.setForeground(unread ? (theme.isDark() ? new Color(0xF9FAFB)
+                : new Color(0x111827))
+                : (theme.isDark() ? new Color(0x9CA3AF) : new Color(0x6B7280)));
+        dot.setForeground(notification.indicatorColor);
+        dot.setVisible(unread);
     }
 
     private void showSettings(Component invoker) {
-        JPopupMenu popup = new RoundedPopup();
-        JMenuItem logout = new JMenuItem("Logout");
-        logout.addActionListener(event -> {
-            activeUser = null;
-            currentPage = "Order Catalog";
-            showLogin();
-        });
-        popup.add(logout);
-        popup.show(invoker, 0, invoker.getHeight());
+        showProfileMenu(invoker);
+    }
+
+    private void showProfileMenu(Component anchor) {
+        if (profilePopup != null && profilePopup.isVisible()) {
+            anchoredPopover.close();
+            return;
+        }
+        showProfilePopover(anchor, "main");
+    }
+
+    private void showProfilePopover(Component anchor, String view) {
+        if (anchoredPopover != null) anchoredPopover.close();
+        javax.swing.JWindow popup = new javax.swing.JWindow(frame);
+        popup.setBackground(new Color(0, 0, 0, 0));
+        TowHitchCore.RoundedPanel card = new TowHitchCore.RoundedPanel(18);
+        card.setBackground(theme.panel());
+        card.setLayout(new BoxLayout(card, BoxLayout.Y_AXIS));
+        card.setBorder(BorderFactory.createCompoundBorder(
+                new TowHitchCore.RoundedBorder.RoundedShadowBorder(
+                        theme.isDark() ? new Color(0x383C45) : new Color(0xDCD8CE),
+                        18, false),
+                BorderFactory.createEmptyBorder(10, 0, 10, 0)));
+        if ("account".equals(view)) {
+            card.add(profileMenuButton("\u2190 Account & Profile",
+                    () -> showProfilePopover(anchor, "main")));
+            card.add(Box.createVerticalStrut(10));
+            addProfileDetail(card, "Full Name", activeUser.fullName);
+            addProfileDetail(card, "Username", "@" + activeUser.username);
+            addProfileDetail(card, "Role", "Customer");
+            addProfileDetail(card, "Branch", "Tow Hitch by 5-21");
+            card.add(profileMenuButton("Change Password", this::changePassword));
+        } else if ("settings".equals(view)) {
+            card.add(profileMenuButton("\u2190 Settings",
+                    () -> showProfilePopover(anchor, "main")));
+            card.add(Box.createVerticalStrut(10));
+            card.add(profilePreference("Notification Alerts", notificationAlerts,
+                    this::setNotificationAlerts));
+            card.add(profilePreference("Auto-Refresh Inventory", autoRefreshInventory,
+                    value -> autoRefreshInventory = value));
+            card.add(Box.createVerticalStrut(8));
+            addProfileDetail(card, "Session & Security", "Signed in securely");
+        } else if ("display".equals(view)) {
+            card.add(profileMenuButton("\u2190 Display & Accessibility",
+                    () -> showProfilePopover(anchor, "main")));
+            card.add(Box.createVerticalStrut(12));
+            card.add(textLabel("Dark Mode", 14, true, theme.text()));
+            card.add(Box.createVerticalStrut(4));
+            javax.swing.JRadioButton off = profileRadio("Off", !theme.isDark());
+            javax.swing.JRadioButton on = profileRadio("On", theme.isDark());
+            javax.swing.ButtonGroup group = new javax.swing.ButtonGroup();
+            group.add(off);
+            group.add(on);
+            off.addActionListener(event -> applyProfileTheme(false));
+            on.addActionListener(event -> applyProfileTheme(true));
+            card.add(off);
+            card.add(on);
+            card.add(Box.createVerticalStrut(8));
+            card.add(profilePreference("Compact View", compactView,
+                    this::setCompactView));
+        } else {
+            JPanel identity = new JPanel(new BorderLayout(10, 0));
+            identity.setOpaque(false);
+            identity.setBorder(BorderFactory.createEmptyBorder(0, 14, 12, 14));
+            identity.add(new TowHitchCore.ProfileButton(theme), BorderLayout.WEST);
+            JPanel labels = new JPanel();
+            labels.setOpaque(false);
+            labels.setLayout(new BoxLayout(labels, BoxLayout.Y_AXIS));
+            labels.add(textLabel(activeUser.fullName, 13, true, theme.text()));
+            labels.add(Box.createVerticalStrut(3));
+            labels.add(textLabel("Customer \u2022 @" + activeUser.username,
+                    12, false, theme.secondaryText()));
+            identity.add(labels, BorderLayout.CENTER);
+            card.add(identity);
+            card.add(profileMenuRow("\u25C9", "Account & Profile",
+                    () -> showProfilePopover(anchor, "account")));
+            card.add(Box.createVerticalStrut(4));
+            card.add(profileMenuRow("\u2699", "Settings",
+                    () -> showProfilePopover(anchor, "settings")));
+            card.add(Box.createVerticalStrut(4));
+            card.add(profileMenuRow("\u263C", "Display & Accessibility",
+                    () -> showProfilePopover(anchor, "display")));
+            card.add(Box.createVerticalStrut(10));
+            card.add(profileDivider());
+            TowHitchCore.PopoverMenuButton logout = new TowHitchCore.PopoverMenuButton(
+                    "Logout", "\u21AA", false, true, theme);
+            logout.addActionListener(event -> logout());
+            card.add(Box.createVerticalStrut(8));
+            card.add(logout);
+        }
+        popup.setContentPane(card);
+        popup.pack();
+        profilePopup = popup;
+        anchoredPopover.show(anchor, popup, true);
+    }
+
+    private TowHitchCore.PopoverMenuButton profileMenuButton(String text, Runnable action) {
+        TowHitchCore.PopoverMenuButton button = new TowHitchCore.PopoverMenuButton(
+                text, "", false, false, theme);
+        button.addActionListener(event -> action.run());
+        return button;
+    }
+
+    private TowHitchCore.PopoverMenuButton profileMenuRow(
+            String icon, String label, Runnable action) {
+        TowHitchCore.PopoverMenuButton button = new TowHitchCore.PopoverMenuButton(
+                label, icon, true, false, theme);
+        button.addActionListener(event -> action.run());
+        return button;
+    }
+
+    private void addProfileDetail(JPanel parent, String key, String value) {
+        JPanel row = new JPanel(new BorderLayout(8, 0));
+        row.setOpaque(false);
+        row.setBorder(BorderFactory.createEmptyBorder(5, 4, 5, 4));
+        row.add(textLabel(key, 12, false, theme.secondaryText()), BorderLayout.WEST);
+        if ("Role".equals(key)) {
+            TowHitchCore.RoundedPanel badge = new TowHitchCore.RoundedPanel(10);
+            badge.setBackground(theme.isDark() ? new Color(0x34312F) : new Color(0xEDE7DD));
+            badge.setBorder(BorderFactory.createEmptyBorder(3, 9, 3, 9));
+            badge.add(textLabel(value.toUpperCase(java.util.Locale.ROOT),
+                    10, true, theme.text()));
+            row.add(badge, BorderLayout.EAST);
+        } else {
+            row.add(textLabel(value, 12, false, theme.text()), BorderLayout.EAST);
+        }
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 30));
+        parent.add(row);
+    }
+
+    private JCheckBox profilePreference(String label, boolean selected,
+                                        java.util.function.Consumer<Boolean> update) {
+        JCheckBox preference = new JCheckBox(label, selected);
+        preference.setOpaque(false);
+        preference.setForeground(theme.text());
+        preference.setAlignmentX(Component.LEFT_ALIGNMENT);
+        preference.addActionListener(event -> update.accept(preference.isSelected()));
+        return preference;
+    }
+
+    private void setNotificationAlerts(boolean enabled) {
+        notificationAlerts = enabled;
+        if (notificationButton != null) {
+            notificationButton.setUnreadCount(enabled ? unreadNotificationCount() : 0);
+        }
+    }
+
+    private void setCompactView(boolean enabled) {
+        compactView = enabled;
+        anchoredPopover.close();
+        buildApplication();
+    }
+
+    private void changePassword() {
+        JPasswordField password = new JPasswordField();
+        int result = JOptionPane.showConfirmDialog(frame, password, "Change Password",
+                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (result != JOptionPane.OK_OPTION) return;
+        String updated = new String(password.getPassword());
+        if (updated.trim().isEmpty()) {
+            JOptionPane.showMessageDialog(frame, "Password cannot be empty.",
+                    "Change Password", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        try {
+            List<TowHitchCore.UserAccount> users = TowHitchCore.loadUsers();
+            boolean accountFound = false;
+            for (TowHitchCore.UserAccount user : users) {
+                if (user.username.equalsIgnoreCase(activeUser.username)) {
+                    user.setPassword(updated);
+                    accountFound = true;
+                }
+            }
+            if (!accountFound) throw new IOException("The signed-in account could not be found.");
+            TowHitchCore.saveUsers(users);
+            activeUser.setPassword(updated);
+            JOptionPane.showMessageDialog(frame, "Password updated successfully.",
+                    "Change Password", JOptionPane.INFORMATION_MESSAGE);
+        } catch (IOException e) {
+            showDataError("Unable to update account password", e);
+        }
+    }
+
+    private JPanel profileDivider() {
+        JPanel divider = new JPanel();
+        divider.setOpaque(true);
+        divider.setBackground(theme.isDark() ? new Color(0x383C45) : new Color(0xE8E3DA));
+        divider.setPreferredSize(new Dimension(1, 1));
+        divider.setMaximumSize(new Dimension(Integer.MAX_VALUE, 1));
+        return divider;
+    }
+
+    private javax.swing.JRadioButton profileRadio(String text, boolean selected) {
+        javax.swing.JRadioButton radio = new javax.swing.JRadioButton(text, selected);
+        radio.setOpaque(false);
+        radio.setForeground(theme.text());
+        radio.setFont(new Font("SansSerif", Font.PLAIN, 13));
+        radio.setAlignmentX(Component.LEFT_ALIGNMENT);
+        radio.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+        return radio;
+    }
+
+    private void applyProfileTheme(boolean dark) {
+        if (theme.isDark() != dark) {
+            theme.setDark(dark);
+            buildApplication();
+        }
+        if (anchoredPopover != null) anchoredPopover.close();
+    }
+
+    private void showAccountSettings() {
+        JOptionPane.showMessageDialog(frame,
+                "Display name: " + activeUser.fullName + "\nUsername: " + activeUser.username
+                        + "\nRole: Customer",
+                "Settings", JOptionPane.INFORMATION_MESSAGE);
+    }
+
+    private void positionProfilePopover(javax.swing.JWindow popup, Component anchor) {
+        java.awt.Point point = anchor.getLocationOnScreen();
+        java.awt.Rectangle bounds = java.awt.GraphicsEnvironment
+                .getLocalGraphicsEnvironment().getMaximumWindowBounds();
+        int x = Math.min(point.x + anchor.getWidth() - popup.getWidth(),
+                bounds.x + bounds.width - popup.getWidth() - 8);
+        x = Math.max(bounds.x + 8, x);
+        int y = point.y + anchor.getHeight() + 6;
+        if (y + popup.getHeight() > bounds.y + bounds.height - 8) {
+            y = point.y - popup.getHeight() - 6;
+        }
+        popup.setLocation(x, y);
+    }
+
+    private void logout() {
+        activeUser = null;
+        currentPage = "Order Catalog";
+        if (anchoredPopover != null) anchoredPopover.close();
+        showLogin();
     }
 
     private void error(String message) {
@@ -831,7 +1383,9 @@ public class CustomerApp {
         private float position = theme.isDark() ? 1f : 0f;
         private Timer timer;
         private ThemeSwitchButton() {
-            setPreferredSize(new Dimension(84, 40));
+            setPreferredSize(new Dimension(60, 30));
+            setMinimumSize(new Dimension(60, 30));
+            setMaximumSize(new Dimension(60, 30));
             setOpaque(false);
             setContentAreaFilled(false);
             setBorderPainted(false);
@@ -859,20 +1413,8 @@ public class CustomerApp {
         }
         @Override protected void paintComponent(Graphics graphics) {
             Graphics2D g = (Graphics2D) graphics.create();
-            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            int width = getWidth();
-            int height = getHeight();
-            g.setColor(theme.isDark() ? new Color(0x34312F) : theme.sidebar());
-            g.fillRoundRect(0, 1, width, height - 2, height - 2, height - 2);
-            int size = height - 10;
-            int x = 5 + Math.round((width - size - 10) * position);
-            g.setColor(theme.isDark() ? new Color(0x303856) : Color.WHITE);
-            g.fillOval(x, 5, size, size);
-            g.setFont(new Font("SansSerif", Font.BOLD, 18));
-            g.setColor(theme.isDark() ? new Color(0x969DAD) : new Color(0x23211F));
-            g.drawString("\u2600", 11, 28);
-            g.setColor(theme.isDark() ? new Color(0xF5E9B8) : new Color(0x8B949E));
-            g.drawString("\u263E", width - 25, 28);
+            TowHitchCore.paintThemeSwitch(g, getWidth(), getHeight(), position,
+                    theme.isDark());
             g.dispose();
         }
 
@@ -916,7 +1458,7 @@ public class CustomerApp {
         }
         @Override public void doLayout() {
             if (card != null) {
-                int width = Math.min(516, getWidth() - 32);
+                int width = Math.min(468, getWidth() - 32);
                 int height = Math.min(card.getPreferredSize().height, getHeight() - 32);
                 card.setBounds((getWidth() - width) / 2, (getHeight() - height) / 2, width, height);
             }
@@ -940,6 +1482,10 @@ public class CustomerApp {
 
     private class GlassLoginCard extends JPanel {
         private static final long serialVersionUID = 1L;
+        private GlassLoginCard() {
+            setOpaque(false);
+        }
+
         @Override protected void paintComponent(Graphics graphics) {
             Graphics2D g = (Graphics2D) graphics.create();
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
@@ -958,10 +1504,13 @@ public class CustomerApp {
 
             private LoginTextField(String placeholder) {
                 this.placeholder = placeholder;
+                TowHitchCore.configureTextField(this);
                 setFont(new Font("SansSerif", Font.PLAIN, 14));
                 setOpaque(false);
                 setBorder(BorderFactory.createEmptyBorder(0, 28, 0, 16));
-                setPreferredSize(new Dimension(394, 51));
+                setPreferredSize(new Dimension(395, 42));
+                setMinimumSize(new Dimension(395, 42));
+                setMaximumSize(new Dimension(395, 42));
             }
 
             @Override
@@ -974,7 +1523,7 @@ public class CustomerApp {
                 setForeground(new Color(0x242221));
                 setCaretColor(new Color(0x242221));
                 super.paintComponent(graphics);
-                if (getText().isEmpty() && !hasFocus()) paintPlaceholder(graphics, placeholder, this);
+                if (getText().isEmpty()) paintPlaceholder(graphics, placeholder, this);
             }
         }
 
@@ -987,7 +1536,9 @@ public class CustomerApp {
                 setFont(new Font("SansSerif", Font.PLAIN, 14));
                 setOpaque(false);
                 setBorder(BorderFactory.createEmptyBorder(0, 28, 0, 16));
-                setPreferredSize(new Dimension(394, 51));
+                setPreferredSize(new Dimension(395, 42));
+                setMinimumSize(new Dimension(395, 42));
+                setMaximumSize(new Dimension(395, 42));
             }
 
             @Override
@@ -1000,7 +1551,7 @@ public class CustomerApp {
                 setForeground(new Color(0x242221));
                 setCaretColor(new Color(0x242221));
                 super.paintComponent(graphics);
-                if (getPassword().length == 0 && !hasFocus()) paintPlaceholder(graphics, placeholder, this);
+                if (getPassword().length == 0) paintPlaceholder(graphics, placeholder, this);
             }
         }
 
@@ -1031,9 +1582,9 @@ public class CustomerApp {
             super.paintComponent(graphics);
             Graphics2D g = (Graphics2D) graphics.create();
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            g.setColor(theme.dashboardPanel());
+            g.setColor(theme.isDark() ? new Color(0x1E2026) : Color.WHITE);
             g.fillRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 18, 18);
-            g.setColor(theme.row());
+            g.setColor(theme.isDark() ? new Color(0x32363F) : new Color(0xECEAE4));
             g.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 18, 18);
             g.dispose();
         }
@@ -1064,8 +1615,10 @@ public class CustomerApp {
                 super.paintComponent(graphics);
                 Graphics2D g = (Graphics2D) graphics.create();
                 g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                g.setColor(theme.input());
-                g.fillRoundRect(0, 0, getWidth(), getHeight(), 12, 12);
+                g.setColor(theme.isDark() ? new Color(0x24272E) : new Color(0xFBF9F5));
+                g.fillRoundRect(1, 1, getWidth() - 3, getHeight() - 3, 12, 12);
+                g.setColor(theme.isDark() ? new Color(0x383C45) : new Color(0xE2DDD3));
+                g.drawRoundRect(1, 1, getWidth() - 3, getHeight() - 3, 12, 12);
                 g.dispose();
             }
         }

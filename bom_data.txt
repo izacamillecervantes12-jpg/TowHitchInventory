@@ -1,0 +1,72 @@
+# Tow Hitch by 5-21 bill of materials.
+Hitch Accessories	Mild steel plates	1
+Hitch Accessories	Square steel tubing	1
+Hitch Accessories	Steel flat bars	1
+Hitch Accessories	Steel rods	1
+Hitch Accessories	Bolts	2
+Hitch Accessories	Nuts	2
+Hitch Accessories	Washers	2
+Hitch Accessories	Welding rods	1
+Hitch Accessories	Metal primer	1
+Hitch Accessories	Paint	1
+Cargo Basket	Square steel tubing	4
+Cargo Basket	Steel flat bars	2
+Cargo Basket	Expanded metal mesh	1
+Cargo Basket	Bolts	4
+Cargo Basket	Nuts	4
+Cargo Basket	Washers	4
+Cargo Basket	Welding rods	1
+Cargo Basket	Metal primer	1
+Cargo Basket	Paint	1
+Bike Rack	Square steel tubing	3
+Bike Rack	Round steel tubing	1
+Bike Rack	Steel flat bars	1
+Bike Rack	Steel rods	1
+Bike Rack	Rubber straps	2
+Bike Rack	Bolts	4
+Bike Rack	Nuts	4
+Bike Rack	Washers	4
+Bike Rack	Welding rods	1
+Bike Rack	Metal primer	1
+Bike Rack	Paint	1
+Trailer	Square steel tubing	12
+Trailer	Steel plates	2
+Trailer	Steel flat bars	3
+Trailer	Trailer axle	1
+Trailer	Wheels and tires	2
+Trailer	Trailer hitch coupler	1
+Trailer	Safety chains	2
+Trailer	Bolts	8
+Trailer	Nuts	8
+Trailer	Washers	8
+Trailer	Welding rods	2
+Trailer	Electrical wires	1
+Trailer	Trailer signal lights	2
+Trailer	Metal primer	1
+Trailer	Paint	1
+Motor Rack Carrier	Square steel tubing	5
+Motor Rack Carrier	Steel plates	2
+Motor Rack Carrier	Steel flat bars	2
+Motor Rack Carrier	Steel rods	1
+Motor Rack Carrier	Expanded metal mesh	1
+Motor Rack Carrier	Wheel chock	1
+Motor Rack Carrier	Tie-down rings	4
+Motor Rack Carrier	Bolts	6
+Motor Rack Carrier	Nuts	6
+Motor Rack Carrier	Washers	6
+Motor Rack Carrier	Welding rods	1
+Motor Rack Carrier	Metal primer	1
+Motor Rack Carrier	Paint	1
+Clamp	Steel plates	2
+Clamp	Steel bars	1
+Clamp	Bolts	1
+Clamp	Nuts	1
+Clamp	Washers	2
+Clamp	Welding rods	1
+Clamp	Metal primer	1
+Clamp	Paint	1
+Hitch Ball Assembly	Steel hitch ball	1
+Hitch Ball Assembly	Steel mounting plate	1
+Hitch Ball Assembly	Bolts	2
+Hitch Ball Assembly	Nuts	2
+Hitch Ball Assembly	Washers	2

@@ -1,1 +1,33 @@
 # Tow Hitch by 5-21 inventory data. Do not edit while the program is running.
+R	Mild steel plates	220	5
+R	Square steel tubing	210	5
+R	Steel flat bars	250	5
+R	Steel rods	100	5
+R	Bolts	110	5
+R	Nuts	100	5
+R	Washers	100	5
+R	Welding rods	150	5
+R	Metal primer	100	5
+R	Paint	100	5
+R	Round steel tubing	80	5
+R	Rubber straps	100	5
+U	Steel plates	0	5
+R	Trailer axle	40	5
+U	Wheels and tires	0	5
+R	Trailer hitch coupler	40	5
+R	Safety chains	50	5
+U	Electrical wires	0	5
+U	Trailer signal lights	0	5
+R	Wheel chock	80	5
+R	Tie-down rings	100	5
+U	Steel bars	0	5
+U	Steel hitch ball	0	5
+R	Steel mounting plate	80	5
+R	Expanded metal mesh	100	5
+F	Hitch Accessories	0	3
+F	Cargo Basket	0	3
+F	Bike Rack	0	3
+F	Trailer	0	3
+F	Motor Rack Carrier	0	3
+F	Clamp	0	3
+F	Hitch Ball Assembly	0	3

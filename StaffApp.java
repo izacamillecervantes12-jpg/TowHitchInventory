@@ -14,6 +14,8 @@ import java.awt.GridLayout;
 import java.awt.Image;
 import java.awt.Insets;
 import java.awt.RenderingHints;
+import java.awt.event.MouseAdapter;
+import java.awt.event.MouseEvent;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -23,15 +25,18 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.ImageIcon;
 import javax.swing.JButton;
+import javax.swing.JCheckBox;
 import javax.swing.JComponent;
 import javax.swing.JDialog;
 import javax.swing.JFrame;
@@ -42,18 +47,21 @@ import javax.swing.JPanel;
 import javax.swing.JPasswordField;
 import javax.swing.JPopupMenu;
 import javax.swing.JScrollPane;
-import javax.swing.JSpinner;
 import javax.swing.JTextField;
-import javax.swing.SpinnerNumberModel;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
 import javax.swing.Timer;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
 
 public class StaffApp {
-    private static final Color GREEN = new Color(0x16A34A);
-    private static final Color GREEN_HOVER = new Color(0x15803D);
-    private static final Color RED = new Color(0xDC2626);
-    private static final Color RED_HOVER = new Color(0xB91C1C);
+    private static final Color GREEN = new Color(0x2E6F40);
+    private static final Color GREEN_HOVER = new Color(0x245832);
+    private static final Color RED = new Color(0xA63A3A);
+    private static final Color RED_HOVER = new Color(0x8C2E2E);
+    private static final int[] UNFINISHED_COLUMNS = {120, -1, 90, 140, 155};
+    private static final int[] REQUEST_COLUMNS = {120, -1, 90, 160, 160};
+    private static final int[] ORDER_COLUMNS = {120, -1, 80, 160, 160, 230};
     private static final DateTimeFormatter TIMESTAMP =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm");
 
@@ -67,21 +75,39 @@ public class StaffApp {
     private final ImageIcon inventoryIcon = TowHitchCore.loadScaledImageAsset("inventory_icon.png", 20, 20);
     private final ImageIcon productionIcon = TowHitchCore.loadScaledImageAsset("production_icon.png", 20, 20);
     private final ImageIcon historyIcon = TowHitchCore.loadScaledImageAsset("history_icon.png", 20, 20);
-    private final ImageIcon notificationIcon = TowHitchCore.loadScaledImageAsset("notification_icon.png", 24, 24);
-    private final ImageIcon settingsIcon = TowHitchCore.loadScaledImageAsset("settings_icon.png", 24, 24);
-    private final String[] pages = {"Dashboard", "Production", "Unfinished Goods",
-            "Stock Requests", "Customer Orders", "History / Archive"};
+    private final ImageIcon notificationIcon = TowHitchCore.loadScaledImageAsset("notification_icon.png", 18, 18);
+    private final ImageIcon settingsIcon = TowHitchCore.loadScaledImageAsset("settings_icon.png", 18, 18);
+    private final String[] pages = {"Dashboard", "Production", "Raw Materials",
+            "Stock Requests", "Customer Orders", "Product Logs", "Stock Order Logs",
+            "Material Consumption", "Trash"};
     private JFrame frame;
     private JPanel pageHost;
+    private JPanel sidebarPanel;
+    private TowHitchCore.FlatIconButton headerMenuButton;
+    private JPanel topBar;
+    private Timer sidebarAnimation;
+    private int sidebarWidth = 255;
     private TowHitchCore.UserAccount activeUser;
+    private String currentStaffName = "";
+    private String currentDisplayName = "";
     private String currentPage = "Dashboard";
     private String searchText = "";
+    private boolean sidebarVisible = true;
+    private boolean historyExpanded;
+    private boolean compactView;
+    private boolean notificationAlerts = true;
+    private boolean autoRefreshInventory = true;
     private LoginBackgroundPanel loginRoot;
     private JLabel loginTitle;
     private JLabel loginSubtitle;
     private JLabel loginMessage;
     private JLabel loginFooter;
-    private JPopupMenu notificationPopup;
+    private javax.swing.JWindow notificationPopup;
+    private javax.swing.JWindow profilePopup;
+    private TowHitchCore.AnchoredPopover anchoredPopover;
+    private TowHitchCore.FlatIconButton notificationButton;
+    private final Set<String> readNotificationIds = new HashSet<>();
+    private final Map<String, Integer> submittedRestockQuantities = new LinkedHashMap<>();
 
     public static void main(String[] args) {
         SwingUtilities.invokeLater(() -> new StaffApp().start());
@@ -103,6 +129,8 @@ public class StaffApp {
         frame.setMinimumSize(new Dimension(1100, 700));
         frame.setSize(1280, 820);
         frame.setLocationRelativeTo(null);
+        anchoredPopover = new TowHitchCore.AnchoredPopover(frame);
+        TowHitchCore.installGlobalMouseHandling();
         showLogin();
         frame.setVisible(true);
     }
@@ -112,52 +140,101 @@ public class StaffApp {
         loginRoot = root;
         JPanel card = new GlassLoginCard();
         card.setLayout(new BoxLayout(card, BoxLayout.Y_AXIS));
-        card.setBorder(BorderFactory.createEmptyBorder(24, 61, 20, 61));
+        card.setBorder(BorderFactory.createEmptyBorder(36, 36, 32, 36));
         JPanel content = new JPanel(new GridBagLayout());
         content.setOpaque(false);
         JLabel logo = new JLabel(loginLogo, SwingConstants.CENTER);
         logo.setPreferredSize(new Dimension(64, 64));
-        loginRow(content, logo, 0, 0, 5);
-        loginTitle = loginHeading("Welcome Back", 34, true);
-        loginRow(content, loginTitle, 1, 0, 4);
-        loginSubtitle = loginHeading("Access your staff dashboard", 18, false);
-        loginRow(content, loginSubtitle, 2, 0, 10);
-        JTextField username = loginField("Enter your username");
+        loginRow(content, logo, 0, 0, 12);
+        loginTitle = loginHeading("Welcome, Crew", 34, true);
+        loginRow(content, loginTitle, 1, 0, 6);
+        loginSubtitle = loginHeading(
+                "Access production tools and submit restock requests.", 15, false);
+        loginRow(content, loginSubtitle, 2, 0, 26);
+        JTextField crewName = loginField("Enter your username");
         JPasswordField password = loginPassword("Enter password");
-        loginRow(content, loginLabel("Username"), 3, 10, 4);
-        loginRow(content, username, 4, 0, 12);
-        loginRow(content, loginLabel("Password"), 5, 0, 4);
-        loginRow(content, password, 6, 0, 8);
+        loginRow(content, loginLabel("Username"), 3, 0, 6);
+        loginRow(content, crewName, 4, 0, 16);
+        loginRow(content, loginLabel("Password"), 5, 0, 6);
+        loginRow(content, password, 6, 0, 24);
         loginMessage = loginHeading(" ", 12, false);
         loginMessage.setForeground(theme.danger());
+        loginMessage.setVisible(false);
         loginRow(content, loginMessage, 7, 0, 7);
         TowHitchCore.RoundedButton signIn = new TowHitchCore.RoundedButton(
                 "Log in", theme.primaryButton(), Color.WHITE, 12, theme);
         signIn.setFont(new Font("SansSerif", Font.BOLD, 14));
-        signIn.setPreferredSize(new Dimension(394, 52));
-        signIn.addActionListener(event -> authenticate(username, password));
-        password.addActionListener(event -> authenticate(username, password));
-        loginRow(content, signIn, 8, 8, 8);
-        content.setPreferredSize(new Dimension(394, content.getPreferredSize().height));
-        card.add(Box.createVerticalGlue());
-        card.add(content);
+        signIn.setPreferredSize(new Dimension(395, 44));
+        signIn.setMinimumSize(new Dimension(395, 44));
+        signIn.setMaximumSize(new Dimension(395, 44));
+        signIn.addActionListener(event -> authenticate(crewName, password));
+        password.addActionListener(event -> authenticate(crewName, password));
+        loginRow(content, signIn, 8, 0, 14);
+        JButton register = new JButton("Create Staff Account");
+        register.setFont(new Font("SansSerif", Font.BOLD, 13));
+        register.setForeground(theme.isDark() ? new Color(0xF5F1ED) : new Color(0x3A3534));
+        register.setOpaque(false);
+        register.setContentAreaFilled(false);
+        register.setBorderPainted(false);
+        register.setFocusPainted(false);
+        register.setCursor(new java.awt.Cursor(java.awt.Cursor.HAND_CURSOR));
+        register.addActionListener(event -> openStaffRegistrationDialog());
+        register.setAlignmentX(JComponent.CENTER_ALIGNMENT);
+        loginRow(content, register, 9, 0, 0);
+        content.setPreferredSize(new Dimension(395, content.getPreferredSize().height));
+        JPanel centeredContent = centerLoginContent(content);
+        card.add(centeredContent);
         loginFooter = loginHeading("Tow Hitch by 5-21 | Staff Portal", 16, false);
-        card.add(Box.createVerticalGlue());
+        loginFooter.setHorizontalAlignment(SwingConstants.CENTER);
+        loginFooter.setAlignmentX(JComponent.CENTER_ALIGNMENT);
+        loginFooter.setPreferredSize(new Dimension(394, 42));
+        loginFooter.setMaximumSize(new Dimension(394, 42));
+        card.add(Box.createVerticalStrut(24));
         card.add(loginFooter);
-        card.setPreferredSize(new Dimension(516, 570));
+        card.setPreferredSize(new Dimension(468,
+                centeredContent.getPreferredSize().height + 24 + 42 + 36 + 32));
         root.setContent(card, new ThemeSwitchButton());
         frame.setContentPane(root);
         frame.revalidate();
         frame.repaint();
     }
 
+    private JPanel centerLoginContent(JPanel content) {
+        Dimension contentSize = new Dimension(395, content.getPreferredSize().height);
+        content.setPreferredSize(contentSize);
+        content.setMinimumSize(contentSize);
+        content.setMaximumSize(contentSize);
+        JPanel wrapper = new JPanel(new GridBagLayout());
+        wrapper.setOpaque(false);
+        wrapper.setAlignmentX(JComponent.CENTER_ALIGNMENT);
+        GridBagConstraints constraints = new GridBagConstraints();
+        constraints.gridx = 0;
+        constraints.gridy = 0;
+        constraints.weightx = 1.0;
+        constraints.anchor = GridBagConstraints.CENTER;
+        wrapper.add(content, constraints);
+        Dimension wrapperSize = new Dimension(396, contentSize.height);
+        wrapper.setPreferredSize(wrapperSize);
+        wrapper.setMinimumSize(wrapperSize);
+        wrapper.setMaximumSize(wrapperSize);
+        return wrapper;
+    }
+
     private void loginRow(JPanel panel, Component component, int row, int top, int bottom) {
         GridBagConstraints c = new GridBagConstraints();
         c.gridx = 0;
         c.gridy = row;
-        c.weightx = 1;
-        c.fill = GridBagConstraints.HORIZONTAL;
-        c.anchor = GridBagConstraints.CENTER;
+        boolean formLabel = component instanceof JLabel
+                && ((JLabel) component).getHorizontalAlignment() == SwingConstants.LEFT;
+        boolean fixedControl = component instanceof JTextField
+                || component instanceof JPasswordField
+                || component instanceof JButton
+                        && component.getPreferredSize().width == 395;
+        c.weightx = fixedControl || formLabel ? 0 : 1;
+        c.fill = fixedControl || formLabel
+                ? GridBagConstraints.NONE : GridBagConstraints.HORIZONTAL;
+        c.anchor = fixedControl || formLabel
+                ? GridBagConstraints.WEST : GridBagConstraints.CENTER;
         c.insets = new Insets(top, 0, bottom, 0);
         panel.add(component, c);
     }
@@ -172,6 +249,9 @@ public class StaffApp {
     private JLabel loginLabel(String text) {
         JLabel label = loginHeading(text, 21, true);
         label.setHorizontalAlignment(SwingConstants.LEFT);
+        label.setPreferredSize(new Dimension(395, 27));
+        label.setMinimumSize(new Dimension(395, 27));
+        label.setMaximumSize(new Dimension(395, 27));
         return label;
     }
 
@@ -183,47 +263,189 @@ public class StaffApp {
         return new LoginPasswordField(placeholder);
     }
 
-    private void authenticate(JTextField username, JPasswordField password) {
+    private void authenticate(JTextField crewNameField, JPasswordField password) {
         try {
-            String name = username.getText().trim();
+            loginMessage.setForeground(theme.danger());
+            String crewName = crewNameField.getText().trim();
             String secret = new String(password.getPassword());
-            for (TowHitchCore.UserAccount user : TowHitchCore.loadUsers()) {
-                if (user.username.equals(name) && user.password.equals(secret)) {
-                    if (!"STAFF".equals(user.role)) {
-                        loginMessage.setText("<html><div style='width:380px;text-align:center'>"
-                                + "Access denied: This portal is restricted to Staff accounts only."
-                                + "</div></html>");
+            if (crewName.isEmpty()) {
+                showLoginMessage("Enter your username.");
+                return;
+            }
+
+            for (TowHitchCore.StaffAccount account : TowHitchCore.loadStaffAccounts()) {
+                if (account.username.equalsIgnoreCase(crewName)
+                        && account.password.equals(secret)) {
+                    if ("PENDING".equals(account.status)) {
+                        showLoginMessage("Your staff account is still pending Admin approval.");
                         return;
                     }
-                    activeUser = user;
+                    if ("REMOVED".equals(account.status)) {
+                        showLoginMessage(
+                                "Your staff account access has been revoked or declined.");
+                        return;
+                    }
+                    activeUser = new TowHitchCore.UserAccount(account.username, account.password,
+                            account.displayName, "STAFF");
+                    currentDisplayName = account.displayName;
+                    currentStaffName = currentDisplayName;
                     buildApplication();
                     return;
                 }
             }
-            loginMessage.setText("Invalid username or password.");
+            for (TowHitchCore.UserAccount user : TowHitchCore.loadUsers()) {
+                if ("STAFF".equals(user.role) && user.password.equals(secret)
+                        && (user.username.equalsIgnoreCase(crewName)
+                                || user.fullName.equalsIgnoreCase(crewName))) {
+                    activeUser = user;
+                    currentDisplayName = user.fullName;
+                    currentStaffName = currentDisplayName;
+                    buildApplication();
+                    return;
+                }
+            }
+            showLoginMessage("Invalid username or password.");
         } catch (IOException e) {
-            loginMessage.setText("Unable to read users.txt: " + e.getMessage());
+            showLoginMessage("Unable to read staff accounts: " + e.getMessage());
+        }
+    }
+
+    private void showLoginMessage(String message) {
+        loginMessage.setText(message);
+        loginMessage.setVisible(message != null && !message.trim().isEmpty());
+        java.awt.Container card = SwingUtilities.getAncestorOfClass(GlassLoginCard.class,
+                loginMessage);
+        if (card != null) {
+            card.setPreferredSize(new Dimension(468,
+                    card.getLayout().preferredLayoutSize(card).height));
+        }
+        loginMessage.getParent().revalidate();
+        loginMessage.getParent().repaint();
+    }
+
+    private void openStaffRegistrationDialog() {
+        JDialog dialog = themedDialog("Create Staff Account", 460, 370, true);
+        JPanel content = dialogContent();
+        JTextField displayName = registrationTextField("Enter display name");
+        JTextField username = registrationTextField("Enter username");
+        JPasswordField password = registrationPasswordField("Enter password");
+        JPasswordField confirmPassword = registrationPasswordField("Confirm password");
+        addFormRow(content, "Display Name", displayName);
+        addFormRow(content, "Username", username);
+        addFormRow(content, "Password", password);
+        addFormRow(content, "Confirm Password", confirmPassword);
+        dialog.add(content, BorderLayout.CENTER);
+
+        JPanel actions = dialogActions();
+        TowHitchCore.RoundedButton cancel = actionButton(
+                "Cancel", theme.sidebar(), theme.text());
+        cancel.addActionListener(event -> dialog.dispose());
+        TowHitchCore.RoundedButton submit = actionButton(
+                "Submit Account", theme.primaryButton(), Color.WHITE);
+        submit.addActionListener(event -> {
+            String display = displayName.getText().trim();
+            String login = username.getText().trim();
+            String secret = new String(password.getPassword());
+            String confirmation = new String(confirmPassword.getPassword());
+            if (display.isEmpty() || login.isEmpty() || secret.isEmpty()) {
+                error("Enter a display name, username, and password.");
+                return;
+            }
+            if (!secret.equals(confirmation)) {
+                error("Password and confirmation do not match.");
+                return;
+            }
+            try {
+                TowHitchCore.registerStaffAccount(display, display, login, secret);
+                dialog.dispose();
+                loginMessage.setForeground(theme.success());
+                showLoginMessage(
+                        "Account submitted! Waiting for Admin approval before you can log in.");
+            } catch (IOException e) {
+                showDataError("Unable to submit staff account", e);
+            }
+        });
+        actions.add(cancel);
+        actions.add(submit);
+        dialog.add(actions, BorderLayout.SOUTH);
+        dialog.setVisible(true);
+    }
+
+    private JTextField registrationTextField(String placeholder) {
+        return new RegistrationTextField(placeholder);
+    }
+
+    private JPasswordField registrationPasswordField(String placeholder) {
+        TowHitchCore.RoundedPasswordField field = new TowHitchCore.RoundedPasswordField(
+                placeholder, 20, theme);
+        field.setBackground(theme.input());
+        field.setBorder(BorderFactory.createCompoundBorder(
+                new TowHitchCore.RoundedBorder(theme.isDark()
+                        ? new Color(0x383C45) : new Color(0xDCD8CE), 12),
+                BorderFactory.createEmptyBorder(8, 10, 8, 10)));
+        field.setPreferredSize(new Dimension(220, 40));
+        field.setMinimumSize(new Dimension(220, 40));
+        field.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
+        return field;
+    }
+
+    @SuppressWarnings("this-escape")
+    private class RegistrationTextField extends TowHitchCore.RoundedTextField {
+        private static final long serialVersionUID = 1L;
+
+        private RegistrationTextField(String placeholder) {
+            super(placeholder, 20, theme);
+            setBorder(BorderFactory.createCompoundBorder(
+                    new TowHitchCore.RoundedBorder(theme.isDark()
+                            ? new Color(0x383C45) : new Color(0xDCD8CE), 12),
+                    BorderFactory.createEmptyBorder(8, 10, 8, 10)));
+            setPreferredSize(new Dimension(220, 40));
+            setMinimumSize(new Dimension(220, 40));
+            setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
+        }
+
+        @Override
+        protected void paintComponent(Graphics graphics) {
+            Graphics2D g = (Graphics2D) graphics.create();
+            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING,
+                    RenderingHints.VALUE_ANTIALIAS_ON);
+            g.setColor(theme.input());
+            g.fillRoundRect(0, 0, getWidth(), getHeight(), 12, 12);
+            g.dispose();
+            super.paintComponent(graphics);
         }
     }
 
     private void buildApplication() {
         JPanel root = new GradientPanel();
-        root.setLayout(new BorderLayout(16, 0));
-        root.setBorder(BorderFactory.createEmptyBorder(14, 14, 14, 14));
-        root.add(buildSidebar(), BorderLayout.WEST);
-        JPanel main = new JPanel(new BorderLayout(0, 14));
-        main.setOpaque(false);
-        main.add(buildTopBar(), BorderLayout.NORTH);
+        root.setLayout(new BorderLayout());
+        root.setBorder(BorderFactory.createEmptyBorder());
+        sidebarPanel = buildSidebar();
+        sidebarPanel.setPreferredSize(new Dimension(sidebarVisible ? sidebarWidth : 0, 100));
+        sidebarPanel.setVisible(sidebarVisible || sidebarWidth > 0);
         pageHost = new JPanel(new CardLayout());
         pageHost.setOpaque(false);
         pageHost.add(buildDashboard(), "Dashboard");
         pageHost.add(buildProductionPage(), "Production");
-        pageHost.add(buildUnfinishedPage(), "Unfinished Goods");
+        pageHost.add(buildUnfinishedPage(), "Raw Materials");
         pageHost.add(buildStockRequestsPage(), "Stock Requests");
         pageHost.add(buildCustomerOrdersPage(), "Customer Orders");
-        pageHost.add(buildHistoryPage(), "History / Archive");
-        main.add(pageHost, BorderLayout.CENTER);
-        root.add(main, BorderLayout.CENTER);
+        pageHost.add(buildHistoryPage("Product Logs"), "Product Logs");
+        pageHost.add(buildHistoryPage("Stock Order Logs"), "Stock Order Logs");
+        pageHost.add(buildHistoryPage("Material Consumption"), "Material Consumption");
+        pageHost.add(buildTrashPage(), "Trash");
+        root.add(sidebarPanel, BorderLayout.WEST);
+        JPanel content = new JPanel(new BorderLayout());
+        content.setOpaque(false);
+        content.add(buildTopBar(), BorderLayout.NORTH);
+        JPanel pageContent = new JPanel(new BorderLayout());
+        pageContent.setOpaque(false);
+        pageContent.setBorder(compactView
+                ? BorderFactory.createEmptyBorder(14, 18, 14, 18)
+                : BorderFactory.createEmptyBorder(24, 28, 24, 28));
+        pageContent.add(pageHost, BorderLayout.CENTER);
+        content.add(pageContent, BorderLayout.CENTER);
+        root.add(content, BorderLayout.CENTER);
         frame.setContentPane(root);
         ((CardLayout) pageHost.getLayout()).show(pageHost, currentPage);
         frame.revalidate();
@@ -231,28 +453,62 @@ public class StaffApp {
     }
 
     private JPanel buildSidebar() {
-        TowHitchCore.RoundedPanel sidebar = new TowHitchCore.RoundedPanel(24);
-        sidebar.setPreferredSize(new Dimension(220, 100));
+        TowHitchCore.RoundedPanel sidebar = new TowHitchCore.RoundedPanel(0);
+        sidebar.setPreferredSize(new Dimension(255, 100));
         sidebar.setBackground(theme.sidebar());
-        sidebar.setBorder(BorderFactory.createEmptyBorder(22, 16, 18, 16));
-        sidebar.setLayout(new BorderLayout(0, 18));
-        JPanel upper = new JPanel(new BorderLayout(0, 22));
+        sidebar.setBorder(BorderFactory.createEmptyBorder(0, 0, 18, 0));
+        sidebar.setLayout(new BorderLayout(0, 0));
+        JPanel upper = new JPanel(new BorderLayout());
         upper.setOpaque(false);
-        ImageIcon logo = theme.isDark() ? sidebarLogoDark : sidebarLogoLight;
-        if (logo != null) {
-            JLabel brand = new JLabel(TowHitchCore.scaleToFitIcon(logo, 172, 112));
-            brand.setHorizontalAlignment(SwingConstants.CENTER);
-            upper.add(brand, BorderLayout.NORTH);
+        ImageIcon brandLogo = theme.isDark() ? sidebarLogoDark : sidebarLogoLight;
+        JPanel logoHero = new JPanel(new GridBagLayout());
+        logoHero.setOpaque(false);
+        logoHero.setBorder(BorderFactory.createEmptyBorder(36, 16, 36, 16));
+        logoHero.setPreferredSize(new Dimension(255, 202));
+        logoHero.setMinimumSize(new Dimension(255, 202));
+        logoHero.setMaximumSize(new Dimension(Integer.MAX_VALUE, 202));
+        if (brandLogo != null) {
+            JLabel logo = new JLabel(TowHitchCore.loadScaledImageAssetFit(
+                    theme.isDark() ? "sidebar_logo_dark.png" : "sidebar_logo_light.png",
+                    210, 130));
+            logo.setHorizontalAlignment(SwingConstants.CENTER);
+            logoHero.add(logo);
         }
-        JPanel nav = new JPanel(new GridLayout(0, 1, 0, 8));
+        upper.add(logoHero, BorderLayout.NORTH);
+        JPanel nav = new JPanel();
         nav.setOpaque(false);
+        nav.setBorder(BorderFactory.createEmptyBorder(0, 12, 0, 12));
+        nav.setLayout(new BoxLayout(nav, BoxLayout.Y_AXIS));
+        nav.setAlignmentX(Component.LEFT_ALIGNMENT);
         for (String page : pages) {
+            if ("Product Logs".equals(page)) {
+                addNavigationButton(nav, "History / Archive",
+                        isHistoryPage(currentPage), historyIcon, 0, () -> {
+                            historyExpanded = !historyExpanded;
+                            buildApplication();
+                        });
+                if (historyExpanded) {
+                    addNavigationButton(nav, page, page.equals(currentPage), historyIcon, 18,
+                            () -> navigate(page));
+                }
+                continue;
+            }
+            if ("Stock Order Logs".equals(page) || "Material Consumption".equals(page)) {
+                if (historyExpanded) {
+                    addNavigationButton(nav, page, page.equals(currentPage), historyIcon, 18,
+                            () -> navigate(page));
+                }
+                continue;
+            }
             boolean selected = page.equals(currentPage);
             Color foreground = selected ? Color.WHITE : theme.secondaryText();
             TowHitchCore.RoundedButton button = new TowHitchCore.RoundedButton(page,
                     selected ? theme.primaryButton() : theme.sidebar(), foreground, 12, theme);
             button.setFont(new Font("SansSerif", selected ? Font.BOLD : Font.PLAIN, 13));
-            button.setPreferredSize(new Dimension(184, 42));
+            button.setPreferredSize(new Dimension(231, 42));
+            button.setMaximumSize(new Dimension(Integer.MAX_VALUE, 42));
+            button.setMargin(new Insets(6, 14, 6, 14));
+            button.setAlignmentX(Component.LEFT_ALIGNMENT);
             button.setHorizontalAlignment(SwingConstants.LEFT);
             ImageIcon icon = iconFor(page);
             if (icon != null) {
@@ -261,20 +517,33 @@ public class StaffApp {
             }
             button.addActionListener(event -> navigate(page));
             nav.add(button);
+            nav.add(Box.createVerticalStrut(6));
         }
+        nav.setAlignmentX(Component.LEFT_ALIGNMENT);
         upper.add(nav, BorderLayout.CENTER);
         sidebar.add(upper, BorderLayout.CENTER);
         TowHitchCore.RoundedButton logout = new TowHitchCore.RoundedButton(
                 "Logout", theme.sidebar(), theme.secondaryText(), 12, theme);
         logout.setPreferredSize(new Dimension(184, 42));
+        logout.setMaximumSize(new Dimension(Integer.MAX_VALUE, 42));
+        logout.setMargin(new Insets(6, 14, 6, 14));
+        logout.setIcon(TowHitchCore.loadTintedIcon("logout_icon.png", 18,
+                theme.isDark() ? new Color(0xD1D5DB) : new Color(0x374151)));
+        logout.setIconTextGap(7);
+        logout.setHorizontalAlignment(SwingConstants.CENTER);
+        logout.setAlignmentX(Component.CENTER_ALIGNMENT);
         logout.addActionListener(event -> {
             activeUser = null;
+            currentStaffName = "";
+            currentDisplayName = "";
             currentPage = "Dashboard";
             showLogin();
         });
         JPanel logoutHolder = new JPanel(new GridBagLayout());
         logoutHolder.setOpaque(false);
-        logoutHolder.add(logout);
+        GridBagConstraints logoutConstraints = new GridBagConstraints();
+        logoutConstraints.anchor = GridBagConstraints.CENTER;
+        logoutHolder.add(logout, logoutConstraints);
         sidebar.add(logoutHolder, BorderLayout.SOUTH);
         return sidebar;
     }
@@ -289,65 +558,156 @@ public class StaffApp {
 
     private void navigate(String page) {
         currentPage = page;
+        if (!isHistoryPage(page)) {
+            historyExpanded = false;
+        }
         buildApplication();
     }
 
+    private void toggleSidebar() {
+        sidebarVisible = !sidebarVisible;
+        if (sidebarPanel == null) {
+            return;
+        }
+        sidebarPanel.setVisible(true);
+        if (sidebarAnimation != null) {
+            sidebarAnimation.stop();
+        }
+        int target = sidebarVisible ? 255 : 0;
+        topBar.revalidate();
+        topBar.repaint();
+        sidebarAnimation = new Timer(15, event -> {
+            int difference = target - sidebarWidth;
+            if (Math.abs(difference) <= 2) {
+                sidebarWidth = target;
+                sidebarPanel.setPreferredSize(new Dimension(sidebarWidth, 100));
+                sidebarPanel.setVisible(sidebarWidth > 0);
+                topBar.revalidate();
+                topBar.repaint();
+                sidebarPanel.getParent().revalidate();
+                sidebarPanel.getParent().repaint();
+                sidebarAnimation.stop();
+                return;
+            }
+            sidebarWidth += difference / 4;
+            if (sidebarWidth == 0 && target > 0) {
+                sidebarWidth = 1;
+            }
+            sidebarPanel.setPreferredSize(new Dimension(sidebarWidth, 100));
+            sidebarPanel.getParent().revalidate();
+            sidebarPanel.getParent().repaint();
+        });
+        sidebarAnimation.start();
+    }
+
+    private void addNavigationButton(JPanel navigation, String text, boolean selected,
+                                     ImageIcon icon, int indent, Runnable action) {
+        int rowHeight = "History / Archive".equals(text) ? 40 : indent > 0 ? 38 : 42;
+        Color foreground = selected ? Color.WHITE : theme.secondaryText();
+        TowHitchCore.RoundedButton button = new TowHitchCore.RoundedButton(
+                text, selected ? theme.primaryButton() : theme.sidebar(), foreground, 12, theme);
+        button.setFont(new Font("SansSerif", selected ? Font.BOLD : Font.PLAIN, 13));
+        button.setPreferredSize(new Dimension(indent > 0 ? 213 : 231, rowHeight));
+        button.setMaximumSize(new Dimension(Integer.MAX_VALUE, rowHeight));
+        button.setMargin(new Insets(6, 14, 6, 14));
+        button.setAlignmentX(Component.LEFT_ALIGNMENT);
+        button.setHorizontalAlignment(SwingConstants.LEFT);
+        if (icon != null) {
+            button.setIcon(TowHitchCore.loadTintedIcon(icon, 18, foreground));
+            button.setIconTextGap(8);
+        }
+        button.addActionListener(event -> action.run());
+        if (indent > 0) {
+            JPanel indented = new JPanel(new BorderLayout());
+            indented.setOpaque(false);
+            indented.setPreferredSize(new Dimension(213, rowHeight));
+            indented.setMinimumSize(new Dimension(0, rowHeight));
+            indented.setMaximumSize(new Dimension(Integer.MAX_VALUE, rowHeight));
+            indented.setBorder(BorderFactory.createEmptyBorder(0, indent, 0, 0));
+            indented.add(button, BorderLayout.CENTER);
+            indented.setAlignmentX(Component.LEFT_ALIGNMENT);
+            navigation.add(indented);
+        } else {
+            navigation.add(button);
+        }
+        navigation.add(Box.createVerticalStrut(
+                indent > 0 || "History / Archive".equals(text) ? 4 : 6));
+    }
+
+    private boolean isHistoryPage(String page) {
+        return "Product Logs".equals(page) || "Stock Order Logs".equals(page)
+                || "Material Consumption".equals(page);
+    }
+
     private JPanel buildTopBar() {
-        TowHitchCore.RoundedPanel top = new TowHitchCore.RoundedPanel(20);
+        TowHitchCore.RoundedPanel top = new TowHitchCore.RoundedPanel(0);
         top.setBackground(theme.panel());
-        top.setLayout(new BorderLayout(12, 0));
-        top.setBorder(BorderFactory.createEmptyBorder(12, 18, 12, 18));
-        JPanel searchArea = new JPanel(new BorderLayout(10, 0));
-        searchArea.setOpaque(false);
-        TowHitchCore.FlatIconButton menu = new TowHitchCore.FlatIconButton("\u2630", "Navigation", theme);
-        menu.setIconButtonSize(30);
-        menu.addActionListener(event -> navigate("Dashboard"));
-        searchArea.add(menu, BorderLayout.WEST);
+        top.setLayout(new GridBagLayout());
+        top.setBorder(BorderFactory.createEmptyBorder(0, 12, 0, 12));
+        top.setPreferredSize(new Dimension(100, 56));
+        top.setMinimumSize(new Dimension(100, 56));
+        GridBagConstraints constraints = new GridBagConstraints();
+        constraints.gridy = 0;
+        constraints.anchor = GridBagConstraints.CENTER;
+        constraints.insets = new Insets(0, 6, 0, 6);
+        headerMenuButton = new TowHitchCore.FlatIconButton("\u2630", "Navigation", theme);
+        headerMenuButton.setIconButtonSize(32);
+        headerMenuButton.setFont(new Font("SansSerif", Font.PLAIN, 15));
+        headerMenuButton.addActionListener(event -> toggleSidebar());
+        constraints.gridx = 0;
+        constraints.weightx = 0;
+        constraints.fill = GridBagConstraints.NONE;
+        top.add(headerMenuButton, constraints);
+
         RoundedSearchPanel searchPanel = new RoundedSearchPanel();
         searchPanel.setLayout(new BorderLayout());
-        searchPanel.setPreferredSize(new Dimension(360, 42));
-        TowHitchCore.RoundedTextField search = new TowHitchCore.RoundedTextField("Search", 24, theme);
+        searchPanel.setPreferredSize(new Dimension(360, 32));
+        searchPanel.setMinimumSize(new Dimension(220, 32));
+        searchPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 32));
+        TowHitchCore.RoundedTextField search = new TowHitchCore.RoundedTextField(
+                "Search", 28, theme);
+        search.setPreferredSize(new Dimension(220, 32));
+        search.setMinimumSize(new Dimension(100, 32));
+        search.setMaximumSize(new Dimension(Integer.MAX_VALUE, 32));
         search.setText(searchText);
         search.setOpaque(false);
         search.addActionListener(event -> {
             searchText = search.getText().trim();
             for (TowHitchCore.InventoryItem item : safeInventory()) {
                 if (item.itemName.toLowerCase().contains(searchText.toLowerCase())) {
-                    navigate(("F".equals(item.type) ? "Production" : "Unfinished Goods"));
+                    navigate(("F".equals(item.type) ? "Production" : "Raw Materials"));
                     return;
                 }
             }
         });
         searchPanel.add(buildSearchLeading(), BorderLayout.WEST);
         searchPanel.add(search, BorderLayout.CENTER);
-        searchArea.add(searchPanel, BorderLayout.CENTER);
-        top.add(searchArea, BorderLayout.CENTER);
-        JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 14, 0));
-        actions.setOpaque(false);
-        JLabel role = new JLabel("STAFF \u2022 " + activeUser.fullName);
-        role.setFont(new Font("SansSerif", Font.BOLD, 12));
-        role.setForeground(theme.success());
-        actions.add(role);
-        ThemeSwitchButton themeButton = new ThemeSwitchButton();
-        actions.add(themeButton);
-        TowHitchCore.FlatIconButton bell = new TowHitchCore.FlatIconButton(
-                TowHitchCore.loadTintedIcon(notificationIcon, 24, theme.text()),
-                "Low-stock notifications", theme);
-        bell.setIconButtonSize(24);
-        bell.setUnreadCount(lowStockCount());
-        bell.addActionListener(event -> showNotifications(bell));
-        TowHitchCore.FlatIconButton settings = new TowHitchCore.FlatIconButton(
-                TowHitchCore.loadTintedIcon(settingsIcon, 24, theme.text()), "Settings", theme);
-        settings.setIconButtonSize(24);
-        settings.addActionListener(event -> showSettings(settings));
-        actions.add(bell);
-        actions.add(settings);
-        top.add(actions, BorderLayout.EAST);
+        constraints.gridx = 1;
+        constraints.weightx = 1;
+        constraints.fill = GridBagConstraints.HORIZONTAL;
+        top.add(searchPanel, constraints);
+
+        notificationButton = new TowHitchCore.FlatIconButton(
+                TowHitchCore.loadTintedIcon(notificationIcon, 18, theme.text()),
+                "Notifications", theme);
+        notificationButton.setIconButtonSize(24);
+        notificationButton.setUnreadCount(notificationAlerts ? unreadNotificationCount() : 0);
+        notificationButton.addActionListener(event -> showNotifications(notificationButton));
+        constraints.gridx = 2;
+        constraints.weightx = 0;
+        constraints.fill = GridBagConstraints.NONE;
+        top.add(notificationButton, constraints);
+        TowHitchCore.ProfileButton profile = new TowHitchCore.ProfileButton(theme);
+        profile.addActionListener(event -> showProfileMenu(profile));
+        constraints.gridx = 3;
+        top.add(profile, constraints);
+        topBar = top;
         return top;
     }
 
     private JPanel buildDashboard() {
-        JPanel page = pageShell("Staff Dashboard", "Production, stock requests, and customer orders.");
+        JPanel page = pageShell("Staff Dashboard",
+                "Real-time overview of inventory levels, stock alerts, and active shop transactions.");
         List<TowHitchCore.InventoryItem> inventory = safeInventory();
         int lowMaterials = 0;
         int finished = 0;
@@ -360,7 +720,7 @@ public class StaffApp {
         try {
             for (TowHitchCore.StockRequest request : TowHitchCore.loadStockRequests()) {
                 if ("PENDING".equals(request.status)
-                        && request.requestedBy.equalsIgnoreCase(activeUser.fullName)) myRequests++;
+                        && request.requestedBy.equalsIgnoreCase(currentStaffName)) myRequests++;
             }
             for (TowHitchCore.CustomerOrder order : TowHitchCore.loadCustomerOrders()) {
                 if ("PENDING".equals(order.status)) pendingOrders++;
@@ -372,7 +732,7 @@ public class StaffApp {
         body.setOpaque(false);
         JPanel cards = new JPanel(new GridLayout(1, 4, 12, 0));
         cards.setOpaque(false);
-        cards.add(summaryCard("Low-Stock Unfinished Materials", Integer.toString(lowMaterials)));
+        cards.add(summaryCard("Low-Stock Raw Materials", Integer.toString(lowMaterials)));
         cards.add(summaryCard("Finished Goods On Hand", Integer.toString(finished)));
         cards.add(summaryCard("My Pending Stock Requests", Integer.toString(myRequests)));
         cards.add(summaryCard("Pending Customer Orders", Integer.toString(pendingOrders)));
@@ -427,22 +787,24 @@ public class StaffApp {
     private JPanel alertRow(TowHitchCore.InventoryItem item) {
         JPanel row = new JPanel(new BorderLayout(12, 0));
         row.setOpaque(false);
-        row.setBorder(BorderFactory.createMatteBorder(0, 0, 1, 0, theme.row()));
-        JPanel left = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 7));
-        left.setOpaque(false);
-        left.add(textLabel(item.itemName, 13, true, theme.text()));
-        left.add(textLabel("F".equals(item.type) ? "Finished" : "Unfinished",
-                11, false, theme.secondaryText()));
-        row.add(left, BorderLayout.WEST);
-        JLabel quantity = textLabel(item.quantity + " stocks (Min: " + item.minAlert + ")",
-                12, true, theme.danger());
+        row.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createMatteBorder(0, 0, 1, 0,
+                        theme.isDark() ? new Color(0x333740) : new Color(0xE5E2DC)),
+                BorderFactory.createEmptyBorder(12, 4, 12, 4)));
+        JLabel name = textLabel(item.itemName, 14, true, theme.text());
+        name.setFont(new Font("SansSerif", Font.BOLD, 14));
+        row.add(name, BorderLayout.WEST);
+        JLabel quantity = textLabel(item.quantity + " stocks",
+                14, true, theme.danger());
+        quantity.setFont(new Font("SansSerif", Font.BOLD, 14));
         row.add(quantity, BorderLayout.EAST);
-        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 42));
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 52));
         return row;
     }
 
     private JPanel buildProductionPage() {
-        JPanel panel = pageShell("Production", "Assemble finished goods using their configured BOM recipe.");
+        JPanel panel = pageShell("Production",
+                "Product assembly workspace with live Bill of Materials availability checks and batch production.");
         JPanel rows = verticalPanel();
         List<TowHitchCore.InventoryItem> inventory = safeInventory();
         Map<String, List<TowHitchCore.BOMItem>> bom;
@@ -462,7 +824,7 @@ public class StaffApp {
         }
         if (count == 0) rows.add(textLabel("No finished goods are available for production.", 14,
                 false, theme.secondaryText()));
-        panel.add(scroll(rows), BorderLayout.CENTER);
+        panel.add(sectionContainer(scroll(rows)), BorderLayout.CENTER);
         return panel;
     }
 
@@ -470,65 +832,251 @@ public class StaffApp {
                                   List<TowHitchCore.InventoryItem> inventory,
                                   List<TowHitchCore.BOMItem> recipe) {
         TowHitchCore.RoundedPanel card = new TowHitchCore.RoundedPanel(16);
-        card.setBackground(theme.panel());
-        card.setBorder(BorderFactory.createEmptyBorder(16, 18, 16, 18));
-        card.setLayout(new BorderLayout(12, 8));
-        JPanel information = new JPanel();
-        information.setOpaque(false);
-        information.setLayout(new BoxLayout(information, BoxLayout.Y_AXIS));
-        JPanel heading = new JPanel(new FlowLayout(FlowLayout.LEFT, 10, 0));
+        card.setBackground(theme.isDark() ? new Color(0x252832) : Color.WHITE);
+        card.setBorder(BorderFactory.createCompoundBorder(
+                new TowHitchCore.RoundedBorder(theme.isDark()
+                        ? new Color(0x383C45) : new Color(0xECEAE4), 16),
+                BorderFactory.createEmptyBorder(12, 18, 12, 18)));
+        card.setLayout(new BorderLayout(12, 0));
+        JPanel heading = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 0));
         heading.setOpaque(false);
         heading.add(textLabel(product.itemName, 16, true, theme.text()));
-        heading.add(textLabel("On Hand: " + product.quantity + "   Min Alert: " + product.minAlert,
-                12, false, theme.secondaryText()));
-        heading.add(new TowHitchCore.StatusPillBadge(stockStatus(product), theme));
-        information.add(heading);
-        information.add(Box.createVerticalStrut(9));
-        List<JLabel> recipeLabels = new ArrayList<>();
+        TowHitchCore.ChevronButton bomToggle = new TowHitchCore.ChevronButton(theme);
+        heading.add(bomToggle);
+        TowHitchCore.RoundedPanel recipeGrid = new TowHitchCore.RoundedPanel(12);
+        recipeGrid.setLayout(new GridLayout(0, 3, 8, 4));
+        recipeGrid.setBackground(theme.isDark() ? new Color(0x22252C) : new Color(0xF8F6F1));
+        recipeGrid.setBorder(BorderFactory.createEmptyBorder(10, 12, 10, 12));
+        recipeGrid.setVisible(false);
         if (recipe.isEmpty()) {
-            information.add(textLabel("BOM: No recipe configured.", 12, false, theme.secondaryText()));
+            recipeGrid.add(textLabel("No BOM recipe configured.", 12,
+                    false, theme.secondaryText()));
         } else {
             for (TowHitchCore.BOMItem component : recipe) {
-                JLabel componentLabel = textLabel("", 12, false, theme.secondaryText());
-                recipeLabels.add(componentLabel);
-                information.add(componentLabel);
+                boolean insufficient = true;
+                for (TowHitchCore.InventoryItem material : inventory) {
+                    if (material.itemName.equalsIgnoreCase(component.materialName)
+                            && material.quantity >= component.quantityRequired) {
+                        insufficient = false;
+                        break;
+                    }
+                }
+                recipeGrid.add(textLabel(component.materialName + " \u00D7 "
+                        + component.quantityRequired, 12, false,
+                        insufficient ? theme.danger() : theme.secondaryText()));
             }
         }
+        JPanel information = new JPanel(new BorderLayout(0, 8));
+        information.setOpaque(false);
+        information.add(heading, BorderLayout.NORTH);
+        information.add(recipeGrid, BorderLayout.CENTER);
+        bomToggle.addActionListener(event -> {
+            bomToggle.setExpanded(!bomToggle.isExpanded());
+            recipeGrid.setVisible(bomToggle.isExpanded());
+            card.revalidate();
+            card.repaint();
+        });
         card.add(information, BorderLayout.CENTER);
-        JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        JPanel statusColumn = new JPanel(new GridBagLayout());
+        statusColumn.setOpaque(false);
+        statusColumn.setPreferredSize(new Dimension(120, 42));
+        statusColumn.setMinimumSize(new Dimension(120, 42));
+        statusColumn.setMaximumSize(new Dimension(120, Integer.MAX_VALUE));
+        statusColumn.add(new TowHitchCore.StatusPillBadge(stockStatus(product), theme));
+        card.add(statusColumn, BorderLayout.WEST);
+        JPanel actions = new JPanel(new GridBagLayout());
         actions.setOpaque(false);
-        JSpinner quantity = new JSpinner(new SpinnerNumberModel(1, 1, 9999, 1));
-        quantity.setPreferredSize(new Dimension(76, 34));
-        Runnable refreshRecipe = () -> {
-            long batch = ((Number) quantity.getValue()).longValue();
-            Map<String, Long> requiredByMaterial = new LinkedHashMap<>();
-            for (TowHitchCore.BOMItem component : recipe) {
-                requiredByMaterial.merge(component.materialName.toLowerCase(Locale.ROOT),
-                        (long) component.quantityRequired * batch, Long::sum);
-            }
-            for (int i = 0; i < recipeLabels.size(); i++) {
-                TowHitchCore.BOMItem component = recipe.get(i);
-                long required = requiredByMaterial.get(component.materialName.toLowerCase(Locale.ROOT));
-                TowHitchCore.InventoryItem material =
-                        findInventory(inventory, component.materialName, false);
-                boolean enough = material != null && material.quantity >= required;
-                String detail = material == null ? "missing"
-                        : "on hand: " + material.quantity + ", needed: " + required;
-                recipeLabels.get(i).setText(component.quantityRequired + " \u00D7 "
-                        + component.materialName + " (" + detail + ")");
-                recipeLabels.get(i).setForeground(enough ? theme.secondaryText() : theme.danger());
-            }
-        };
-        quantity.addChangeListener(event -> refreshRecipe.run());
-        refreshRecipe.run();
-        actions.add(quantity);
-        TowHitchCore.RoundedButton produce = actionButton("Produce", GREEN, Color.WHITE);
-        produce.setPreferredSize(new Dimension(112, 38));
-        produce.addActionListener(event -> produce(product.itemName,
-                ((Number) quantity.getValue()).intValue()));
-        actions.add(produce);
+        TowHitchCore.RoundedButton produce = actionButton(
+                "Produce", GREEN, new Color(0xF8FAFC));
+        produce.setPreferredSize(new Dimension(135, 34));
+        boolean enough = canProduce(recipe, inventory, 1);
+        produce.setText(enough ? "Produce" : "Insufficient Stock");
+        produce.setEnabled(enough);
+        produce.addActionListener(event -> openProductionDialog(product, recipe));
+        GridBagConstraints actionConstraints = new GridBagConstraints();
+        actionConstraints.anchor = GridBagConstraints.CENTER;
+        actions.add(produce, actionConstraints);
         card.add(actions, BorderLayout.EAST);
         return card;
+    }
+
+    private boolean canProduce(List<TowHitchCore.BOMItem> recipe,
+                               List<TowHitchCore.InventoryItem> inventory, int quantity) {
+        if (recipe.isEmpty() || quantity < 1) {
+            return false;
+        }
+        Map<String, Long> needed = new LinkedHashMap<>();
+        Map<String, String> names = new LinkedHashMap<>();
+        for (TowHitchCore.BOMItem component : recipe) {
+            if (!validField(component.materialName) || component.quantityRequired < 1) {
+                return false;
+            }
+            String key = component.materialName.toLowerCase(Locale.ROOT);
+            needed.merge(key, (long) component.quantityRequired * quantity, Long::sum);
+            names.putIfAbsent(key, component.materialName);
+        }
+        for (Map.Entry<String, Long> requirement : needed.entrySet()) {
+            int matches = 0;
+            int available = 0;
+            for (TowHitchCore.InventoryItem item : inventory) {
+                if (!"F".equals(item.type)
+                        && item.itemName.equalsIgnoreCase(names.get(requirement.getKey()))) {
+                    matches++;
+                    available = item.quantity;
+                }
+            }
+            if (matches != 1 || available < requirement.getValue()) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void openProductionDialog(TowHitchCore.InventoryItem product,
+                                      List<TowHitchCore.BOMItem> recipe) {
+        JDialog dialog = themedDialog("Produce " + product.itemName, 560, 500);
+        JPanel content = dialogContent();
+        content.setLayout(new BorderLayout(0, 14));
+        JPanel quantityRow = new JPanel(new FlowLayout(FlowLayout.CENTER, 12, 4));
+        quantityRow.setOpaque(false);
+        JButton decrement = stepperButton("\u2212");
+        JTextField quantity = dialogField("1");
+        quantity.setHorizontalAlignment(SwingConstants.CENTER);
+        quantity.setPreferredSize(new Dimension(90, 38));
+        JButton increment = stepperButton("+");
+        quantityRow.add(decrement);
+        quantityRow.add(quantity);
+        quantityRow.add(increment);
+        JPanel top = new JPanel(new BorderLayout(0, 8));
+        top.setOpaque(false);
+        top.add(textLabel("Batch quantity", 14, true, theme.text()), BorderLayout.NORTH);
+        top.add(quantityRow, BorderLayout.CENTER);
+        content.add(top, BorderLayout.NORTH);
+        JPanel previewRows = verticalPanel();
+        JScrollPane previewScroll = scroll(previewRows);
+        content.add(previewScroll, BorderLayout.CENTER);
+        JLabel warning = textLabel("", 12, true, theme.danger());
+        JPanel bottom = new JPanel(new BorderLayout(0, 8));
+        bottom.setOpaque(false);
+        bottom.add(warning, BorderLayout.NORTH);
+        JPanel buttons = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
+        buttons.setOpaque(false);
+        TowHitchCore.RoundedButton cancel = actionButton("Cancel", theme.input(), theme.text());
+        TowHitchCore.RoundedButton confirm = actionButton(
+                "Confirm Production", GREEN, new Color(0xF8FAFC));
+        buttons.add(cancel);
+        buttons.add(confirm);
+        bottom.add(buttons, BorderLayout.SOUTH);
+        content.add(bottom, BorderLayout.SOUTH);
+
+        Runnable refreshPreview = () -> {
+            int amount = parseBatchQuantity(quantity.getText());
+            previewRows.removeAll();
+            boolean sufficient = amount > 0;
+            List<TowHitchCore.InventoryItem> latest;
+            try {
+                latest = TowHitchCore.loadInventory();
+            } catch (IOException e) {
+                showDataError("Unable to load current inventory", e);
+                latest = new ArrayList<>();
+                sufficient = false;
+            }
+            Map<String, Long> required = new LinkedHashMap<>();
+            Map<String, String> names = new LinkedHashMap<>();
+            for (TowHitchCore.BOMItem component : recipe) {
+                String key = component.materialName.toLowerCase(Locale.ROOT);
+                required.merge(key, (long) component.quantityRequired * Math.max(1, amount),
+                        Long::sum);
+                names.putIfAbsent(key, component.materialName);
+            }
+            for (Map.Entry<String, Long> line : required.entrySet()) {
+                int matches = 0;
+                int available = 0;
+                for (TowHitchCore.InventoryItem item : latest) {
+                    if (!"F".equals(item.type)
+                            && item.itemName.equalsIgnoreCase(names.get(line.getKey()))) {
+                        matches++;
+                        available = item.quantity;
+                    }
+                }
+                boolean enough = matches == 1 && available >= line.getValue();
+                sufficient &= enough;
+                JLabel detail = textLabel(names.get(line.getKey()) + ": Needed "
+                        + line.getValue() + " vs. Available "
+                        + (matches == 1 ? available : matches == 0 ? "missing" : "duplicate"),
+                        13, true, enough ? theme.success() : theme.danger());
+                TowHitchCore.RoundedPanel row = new TowHitchCore.RoundedPanel(10);
+                row.setBackground(theme.row());
+                row.setBorder(BorderFactory.createEmptyBorder(9, 12, 9, 12));
+                row.setLayout(new BorderLayout());
+                row.add(detail, BorderLayout.CENTER);
+                row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 42));
+                previewRows.add(row);
+                previewRows.add(Box.createVerticalStrut(6));
+            }
+            confirm.setEnabled(sufficient && !recipe.isEmpty());
+            warning.setText(sufficient ? " " : "Insufficient raw material for this batch.");
+            previewRows.revalidate();
+            previewRows.repaint();
+        };
+        quantity.getDocument().addDocumentListener(new DocumentListener() {
+            @Override public void insertUpdate(DocumentEvent event) { refreshPreview.run(); }
+            @Override public void removeUpdate(DocumentEvent event) { refreshPreview.run(); }
+            @Override public void changedUpdate(DocumentEvent event) { refreshPreview.run(); }
+        });
+        decrement.addActionListener(event -> adjustBatchQuantity(quantity, -1));
+        increment.addActionListener(event -> adjustBatchQuantity(quantity, 1));
+        cancel.addActionListener(event -> dialog.dispose());
+        confirm.addActionListener(event -> {
+            int amount = parseBatchQuantity(quantity.getText());
+            if (amount < 1) {
+                warning.setText("Enter a quantity of at least 1.");
+                return;
+            }
+            if (JOptionPane.showConfirmDialog(dialog,
+                    "Produce " + amount + " " + product.itemName
+                            + " unit(s) and deduct the required raw materials?",
+                    "Confirm Production", JOptionPane.YES_NO_OPTION,
+                    JOptionPane.QUESTION_MESSAGE) != JOptionPane.YES_OPTION) {
+                return;
+            }
+            produce(product.itemName, amount);
+            dialog.dispose();
+        });
+        refreshPreview.run();
+        dialog.add(content, BorderLayout.CENTER);
+        dialog.setVisible(true);
+    }
+
+    private JButton stepperButton(String text) {
+        JButton button = new JButton(text);
+        button.setFont(new Font("SansSerif", Font.BOLD, 16));
+        button.setForeground(theme.secondaryText());
+        button.setOpaque(false);
+        button.setContentAreaFilled(false);
+        button.setBorderPainted(false);
+        button.setFocusPainted(false);
+        button.setPreferredSize(new Dimension(24, 26));
+        return button;
+    }
+
+    private void adjustBatchQuantity(JTextField quantity, int delta) {
+        try {
+            int current = Integer.parseInt(quantity.getText().trim());
+            int next = Math.max(1, Math.min(9999, current + delta));
+            quantity.setText(Integer.toString(next));
+        } catch (NumberFormatException e) {
+            quantity.setText("1");
+        }
+    }
+
+    private int parseBatchQuantity(String value) {
+        try {
+            int quantity = Integer.parseInt(value.trim());
+            return quantity >= 1 && quantity <= 9999 ? quantity : 0;
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     private void produce(String productName, int batchQuantity) {
@@ -544,7 +1092,7 @@ public class StaffApp {
             Map<String, Long> deductions = new LinkedHashMap<>();
             Map<String, String> materialNames = new LinkedHashMap<>();
             for (TowHitchCore.BOMItem component : recipe) {
-                if (component.quantityRequired < 0 || !validField(component.materialName)) {
+                if (component.quantityRequired <= 0 || !validField(component.materialName)) {
                     error("The BOM contains an invalid material or quantity.");
                     return;
                 }
@@ -617,22 +1165,24 @@ public class StaffApp {
                 updated.add(new TowHitchCore.InventoryItem(item.type, item.itemName, quantity, item.minAlert));
             }
             TowHitchCore.saveInventory(updated);
-            TowHitchCore.appendHistory("Produced: " + productName + " (" + batchQuantity + ")");
+            TowHitchCore.appendHistory("Produced: " + batchQuantity + " " + productName
+                    + " (by " + currentStaffName + ")");
             for (Map.Entry<String, Long> entry : deductions.entrySet()) {
-                TowHitchCore.appendHistory("Consumed for " + productName + ": "
-                        + materialNames.get(entry.getKey()) + " (" + entry.getValue() + ")");
+                TowHitchCore.appendHistory("Deducted: " + entry.getValue() + " "
+                        + materialNames.get(entry.getKey()) + " (by " + currentStaffName + ")");
             }
             currentPage = "Production";
+            TowHitchCore.showToast(frame, batchQuantity + " " + productName
+                    + " unit(s) produced", true);
             buildApplication();
-            JOptionPane.showMessageDialog(frame, "Production batch recorded successfully.",
-                    "Production", JOptionPane.INFORMATION_MESSAGE);
         } catch (IOException e) {
             showDataError("Unable to save production batch", e);
         }
     }
 
     private JPanel buildUnfinishedPage() {
-        JPanel page = pageShell("Unfinished Goods", "View raw materials and request restocks from the Owner.");
+        JPanel page = pageShell("Raw Materials",
+                "Raw material stock directory with live availability status and restock request submission.");
         TowHitchCore.RoundedButton create = actionButton("+ New Stock Request",
                 theme.primaryButton(), Color.WHITE);
         create.addActionListener(event -> openRequestDialog(null));
@@ -641,33 +1191,73 @@ public class StaffApp {
         JPanel rows = verticalPanel();
         JPanel list = new JPanel(new BorderLayout(0, 7));
         list.setOpaque(false);
-        list.add(tableHeader(new String[] {"Status", "Material Name", "On Hand", "Min Alert", "Action"},
-                new double[] {.18, .32, .16, .16, .18}), BorderLayout.NORTH);
+        JPanel columnHeader = tableHeader(new String[] {
+                "Status", "Material Name", "On Hand", "Pending Request", ""
+        }, UNFINISHED_COLUMNS);
         JPanel data = verticalPanel();
+        Map<String, Long> pendingByMaterial = new LinkedHashMap<>();
+        try {
+            for (TowHitchCore.StockRequest request : TowHitchCore.loadStockRequests()) {
+                if ("PENDING".equalsIgnoreCase(request.status)) {
+                    String key = request.materialName.toLowerCase(Locale.ROOT);
+                    pendingByMaterial.merge(key, (long) request.quantity, Long::sum);
+                }
+            }
+        } catch (IOException e) {
+            showDataError("Unable to load pending stock requests", e);
+        }
         for (TowHitchCore.InventoryItem item : safeInventory()) {
             if ("F".equals(item.type) || !matchesSearch(item.itemName)) continue;
-            data.add(materialRow(item));
+            String key = item.itemName.toLowerCase(Locale.ROOT);
+            data.add(materialRow(item, pendingByMaterial.getOrDefault(key, 0L),
+                    submittedRestockQuantities.get(key)));
             data.add(Box.createVerticalStrut(7));
         }
-        if (data.getComponentCount() == 0) data.add(textLabel("No unfinished goods found.", 13,
+        if (data.getComponentCount() == 0) data.add(textLabel("No raw materials found.", 13,
                 false, theme.secondaryText()));
-        list.add(scroll(data), BorderLayout.CENTER);
+        JScrollPane dataScroll = scroll(data);
+        alignHeaderToTableViewport(columnHeader, dataScroll);
+        list.add(columnHeader, BorderLayout.NORTH);
+        list.add(dataScroll, BorderLayout.CENTER);
         rows.add(list);
-        page.add(rows, BorderLayout.CENTER);
+        page.add(sectionContainer(rows), BorderLayout.CENTER);
         return page;
     }
 
-    private JPanel materialRow(TowHitchCore.InventoryItem item) {
+    private JPanel materialRow(TowHitchCore.InventoryItem item, long pendingQuantity,
+                               Integer submittedQuantity) {
         JPanel row = rowPanel();
-        addCell(row, new TowHitchCore.StatusPillBadge(stockStatus(item), theme), 0, .18);
-        addCell(row, tableCell(item.itemName), 1, .32);
-        addCell(row, tableCell(Integer.toString(item.quantity)), 2, .16);
-        addCell(row, tableCell(Integer.toString(item.minAlert)), 3, .16);
-        TowHitchCore.RoundedButton request = actionButton("Request Restock",
-                theme.primaryButton(), Color.WHITE);
+        addCell(row, new TowHitchCore.StatusPillBadge(stockStatus(item), theme), 0,
+                UNFINISHED_COLUMNS, SwingConstants.CENTER);
+        JPanel nameDetails = new JPanel();
+        nameDetails.setOpaque(false);
+        nameDetails.setLayout(new BoxLayout(nameDetails, BoxLayout.Y_AXIS));
+        nameDetails.add(tableNameCell(item.itemName));
+        if (submittedQuantity != null) {
+            JLabel confirmation = textLabel(
+                    "\u2713 Restock request submitted (+" + submittedQuantity + ")",
+                    12, true, GREEN);
+            confirmation.setFont(confirmation.getFont().deriveFont(11.5f));
+            nameDetails.add(confirmation);
+        }
+        addCell(row, nameDetails, 1, UNFINISHED_COLUMNS, SwingConstants.LEFT);
+        addCell(row, tableCell(Integer.toString(item.quantity)), 2,
+                UNFINISHED_COLUMNS, SwingConstants.CENTER);
+        JLabel pending = tableCell(pendingQuantity > 0
+                ? "+" + pendingQuantity + " pending" : "\u2014");
+        pending.setForeground(pendingQuantity > 0
+                ? (theme.isDark() ? new Color(0xD6B77A) : new Color(0x8A6A32))
+                : theme.secondaryText());
+        addCell(row, pending, 3,
+                UNFINISHED_COLUMNS, SwingConstants.CENTER);
+        Color requestFill = theme.isDark() ? new Color(0xE5E0D8) : new Color(0x3F3D39);
+        Color requestText = theme.isDark() ? new Color(0x1C1B19) : new Color(0xFAF8F5);
+        TowHitchCore.RoundedButton request = actionButton("Request Restock", requestFill, requestText);
+        request.setPreferredSize(new Dimension(135, 32));
+        request.setMinimumSize(new Dimension(135, 32));
         request.addActionListener(event -> openRequestDialog(item.itemName));
-        addCell(row, request, 4, .18);
-        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 54));
+        addCell(row, request, 4, UNFINISHED_COLUMNS, SwingConstants.CENTER);
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 66));
         return row;
     }
 
@@ -676,8 +1266,20 @@ public class StaffApp {
         JPanel content = dialogContent();
         JTextField material = dialogField(materialName == null ? "" : materialName);
         if (materialName != null) material.setEditable(false);
-        JSpinner quantity = new JSpinner(new SpinnerNumberModel(1, 1, 1000000, 1));
-        addFormRow(content, "Material Name", material);
+        TowHitchCore.RoundedPanel materialBox = new TowHitchCore.RoundedPanel(12);
+        materialBox.setBackground(theme.input());
+        materialBox.setLayout(new BorderLayout());
+        materialBox.setBorder(BorderFactory.createCompoundBorder(
+                new TowHitchCore.RoundedBorder(theme.row(), 12),
+                BorderFactory.createEmptyBorder(0, 8, 0, 8)));
+        material.setOpaque(false);
+        material.setBorder(BorderFactory.createEmptyBorder(0, 2, 0, 2));
+        materialBox.add(material, BorderLayout.CENTER);
+        materialBox.setPreferredSize(new Dimension(230, 38));
+        TowHitchCore.RoundedBorder.QuantityStepper quantity =
+                new TowHitchCore.RoundedBorder.QuantityStepper(1, 1, 1000000, theme);
+        quantity.setPreferredWidth(150);
+        addFormRow(content, "Material Name", materialBox);
         addFormRow(content, "Requested Quantity", quantity);
         dialog.add(content, BorderLayout.CENTER);
         JPanel actions = dialogActions();
@@ -686,7 +1288,14 @@ public class StaffApp {
         TowHitchCore.RoundedButton submit = actionButton("Submit Request", theme.primaryButton(), Color.WHITE);
         submit.addActionListener(event -> {
             String name = material.getText().trim();
-            if (!validField(name) || ((Number) quantity.getValue()).intValue() < 1) {
+            int requestedQuantity;
+            try {
+                requestedQuantity = quantity.getValue();
+            } catch (IllegalArgumentException e) {
+                error(e.getMessage());
+                return;
+            }
+            if (!validField(name) || requestedQuantity < 1) {
                 error("Enter a material name and a quantity greater than zero.");
                 return;
             }
@@ -696,19 +1305,21 @@ public class StaffApp {
                     if (!"F".equals(item.type) && item.itemName.equalsIgnoreCase(name)) exists = true;
                 }
                 if (!exists) {
-                    error("That unfinished material does not exist.");
+                    error("That raw material does not exist.");
                     return;
                 }
                 List<TowHitchCore.StockRequest> requests = TowHitchCore.loadStockRequests();
                 String id = "SR-" + System.currentTimeMillis();
-                requests.add(new TowHitchCore.StockRequest(id, now(), activeUser.fullName,
-                        name, ((Number) quantity.getValue()).intValue(), "PENDING"));
+                requests.add(new TowHitchCore.StockRequest(id, now(), currentStaffName,
+                        name, requestedQuantity, "PENDING"));
                 TowHitchCore.saveStockRequests(requests);
                 TowHitchCore.appendHistory("Requested restock: "
-                        + ((Number) quantity.getValue()).intValue() + " " + name
-                        + " - Requested by " + activeUser.fullName);
+                        + requestedQuantity + " " + name
+                        + " - Requested by " + currentStaffName);
                 dialog.dispose();
-                currentPage = "Stock Requests";
+                submittedRestockQuantities.put(name.toLowerCase(Locale.ROOT),
+                        requestedQuantity);
+                currentPage = "Raw Materials";
                 buildApplication();
             } catch (IOException e) {
                 showDataError("Unable to save stock request", e);
@@ -721,12 +1332,13 @@ public class StaffApp {
     }
 
     private JPanel buildStockRequestsPage() {
-        JPanel page = pageShell("Stock Requests", "Track Owner decisions on your material restock requests.");
+        JPanel page = pageShell("Stock Requests",
+                "Restock request ledger tracking material replenishment approvals between Staff and Owner.");
         JPanel list = new JPanel(new BorderLayout(0, 7));
         list.setOpaque(false);
-        double[] weights = {.17, .24, .08, .22, .29};
-        list.add(tableHeader(new String[] {"Status", "Material", "Qty", "Requested By", "Date"}, weights),
-                BorderLayout.NORTH);
+        JPanel header = tableHeader(new String[] {
+                "Status", "Material", "Qty", "Requested By", "Date"
+        }, REQUEST_COLUMNS);
         JPanel rows = verticalPanel();
         try {
             List<TowHitchCore.StockRequest> requests = TowHitchCore.loadStockRequests();
@@ -735,11 +1347,16 @@ public class StaffApp {
                     b.timestamp.compareTo(a.timestamp)));
             for (TowHitchCore.StockRequest request : requests) {
                 JPanel row = rowPanel();
-                addCell(row, new TowHitchCore.StatusPillBadge(request.status, theme), 0, weights[0]);
-                addCell(row, tableCell(request.materialName), 1, weights[1]);
-                addCell(row, tableCell(Integer.toString(request.quantity)), 2, weights[2]);
-                addCell(row, tableCell(request.requestedBy), 3, weights[3]);
-                addCell(row, tableCell(request.timestamp), 4, weights[4]);
+                addCell(row, new TowHitchCore.StatusPillBadge(request.status, theme), 0,
+                        REQUEST_COLUMNS, SwingConstants.CENTER);
+                addCell(row, tableNameCell(request.materialName), 1,
+                        REQUEST_COLUMNS, SwingConstants.LEFT);
+                addCell(row, tableCell(Integer.toString(request.quantity)), 2,
+                        REQUEST_COLUMNS, SwingConstants.CENTER);
+                addCell(row, tableCell(request.requestedBy), 3,
+                        REQUEST_COLUMNS, SwingConstants.CENTER);
+                addCell(row, tableCell(TowHitchCore.formatSmartDate(request.timestamp)), 4,
+                        REQUEST_COLUMNS, SwingConstants.CENTER);
                 row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 52));
                 rows.add(row);
                 rows.add(Box.createVerticalStrut(7));
@@ -749,18 +1366,22 @@ public class StaffApp {
         }
         if (rows.getComponentCount() == 0) rows.add(textLabel("No stock requests yet.", 13,
                 false, theme.secondaryText()));
-        list.add(scroll(rows), BorderLayout.CENTER);
-        page.add(list, BorderLayout.CENTER);
+        JScrollPane dataScroll = scroll(rows);
+        alignHeaderToTableViewport(header, dataScroll);
+        list.add(header, BorderLayout.NORTH);
+        list.add(dataScroll, BorderLayout.CENTER);
+        page.add(sectionContainer(list), BorderLayout.CENTER);
         return page;
     }
 
     private JPanel buildCustomerOrdersPage() {
-        JPanel page = pageShell("Customer Orders", "Release available orders or cancel pending orders.");
+        JPanel page = pageShell("Customer Orders",
+                "Client order queue for reviewing pending orders and confirming product releases.");
         JPanel list = new JPanel(new BorderLayout(0, 7));
         list.setOpaque(false);
-        double[] weights = {.12, .17, .06, .16, .12, .37};
-        list.add(tableHeader(new String[] {"Status", "Product", "Qty", "Customer", "Order Date", "Actions"},
-                weights), BorderLayout.NORTH);
+        JPanel header = tableHeader(new String[] {
+                "Status", "Product", "Qty", "Customer", "Order Date", ""
+        }, ORDER_COLUMNS);
         JPanel rows = verticalPanel();
         try {
             List<TowHitchCore.CustomerOrder> orders = TowHitchCore.loadCustomerOrders();
@@ -768,7 +1389,7 @@ public class StaffApp {
                     !"PENDING".equals(o.status)).thenComparing((a, b) ->
                     b.timestamp.compareTo(a.timestamp)));
             for (TowHitchCore.CustomerOrder order : orders) {
-                rows.add(orderRow(order, weights));
+                rows.add(orderRow(order));
                 rows.add(Box.createVerticalStrut(7));
             }
         } catch (IOException e) {
@@ -776,29 +1397,37 @@ public class StaffApp {
         }
         if (rows.getComponentCount() == 0) rows.add(textLabel("No customer orders.", 13,
                 false, theme.secondaryText()));
-        list.add(scroll(rows), BorderLayout.CENTER);
-        page.add(list, BorderLayout.CENTER);
+        JScrollPane dataScroll = scroll(rows);
+        alignHeaderToTableViewport(header, dataScroll);
+        list.add(header, BorderLayout.NORTH);
+        list.add(dataScroll, BorderLayout.CENTER);
+        page.add(sectionContainer(list), BorderLayout.CENTER);
         return page;
     }
 
-    private JPanel orderRow(TowHitchCore.CustomerOrder order, double[] weights) {
+    private JPanel orderRow(TowHitchCore.CustomerOrder order) {
         JPanel row = rowPanel();
-        addCell(row, new TowHitchCore.StatusPillBadge(order.status, theme), 0, weights[0]);
-        addCell(row, tableCell(order.productName), 1, weights[1]);
-        addCell(row, tableCell(Integer.toString(order.quantity)), 2, weights[2]);
-        addCell(row, tableCell(order.customerName), 3, weights[3]);
-        addCell(row, tableCell(order.timestamp), 4, weights[4]);
+        addCell(row, new TowHitchCore.StatusPillBadge(order.status, theme), 0,
+                ORDER_COLUMNS, SwingConstants.CENTER);
+        addCell(row, tableNameCell(order.productName), 1, ORDER_COLUMNS, SwingConstants.LEFT);
+        addCell(row, tableCell(Integer.toString(order.quantity)), 2,
+                ORDER_COLUMNS, SwingConstants.CENTER);
+        addCell(row, tableCell(order.customerName), 3, ORDER_COLUMNS, SwingConstants.LEFT);
+        addCell(row, tableCell(TowHitchCore.formatSmartDate(order.timestamp)),
+                4, ORDER_COLUMNS, SwingConstants.LEFT);
         JPanel actions = new JPanel(new FlowLayout(FlowLayout.RIGHT, 5, 0));
         actions.setOpaque(false);
         if ("PENDING".equals(order.status)) {
-            TowHitchCore.RoundedButton release = actionButton("Confirm & Release", GREEN, Color.WHITE);
+            TowHitchCore.RoundedButton release = actionButton(
+                    "Confirm & Release", GREEN, new Color(0xF8FAFC));
             release.addActionListener(event -> releaseOrder(order));
-            TowHitchCore.RoundedButton cancel = actionButton("Cancel Order", RED, Color.WHITE);
+            TowHitchCore.RoundedButton cancel = actionButton(
+                    "Cancel Order", RED, new Color(0xFAF8F5));
             cancel.addActionListener(event -> cancelOrder(order));
             actions.add(release);
             actions.add(cancel);
         }
-        addCell(row, actions, 5, weights[5]);
+        addCell(row, actions, 5, ORDER_COLUMNS, SwingConstants.CENTER);
         row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 56));
         return row;
     }
@@ -844,7 +1473,8 @@ public class StaffApp {
             TowHitchCore.saveCustomerOrders(orders);
             TowHitchCore.appendHistory("Completed customer order: " + selected.orderId + " - "
                     + selected.quantity + " " + selected.productName + " for "
-                    + selected.customerName + " - Released by Staff " + activeUser.fullName);
+                    + selected.customerName + " - Released by " + currentStaffName);
+            TowHitchCore.showToast(frame, "Order released to " + selected.customerName, true);
             buildApplication();
         } catch (IOException e) {
             showDataError("Unable to release customer order", e);
@@ -871,48 +1501,211 @@ public class StaffApp {
             }
             TowHitchCore.saveCustomerOrders(orders);
             TowHitchCore.appendHistory("Cancelled customer order: " + selected.orderId
-                    + " - Cancelled by Staff " + activeUser.fullName);
+                    + " - Cancelled by " + currentStaffName);
             buildApplication();
         } catch (IOException e) {
             showDataError("Unable to cancel customer order", e);
         }
     }
 
-    private JPanel buildHistoryPage() {
-        JPanel page = pageShell("History / Archive",
-                "Production, material consumption, restock, and order records.");
+    private JPanel buildHistoryPage(String title) {
+        String subtitle = "Product Logs".equals(title)
+                ? "Newest-first completed product assemblies."
+                : "Stock Order Logs".equals(title)
+                        ? "Newest-first approved restocks and released customer orders."
+                        : "Newest-first raw material deductions.";
+        JPanel page = pageShell(title, subtitle);
         JPanel header = (JPanel) page.getComponent(0);
-        TowHitchCore.RoundedTextField search =
-                new TowHitchCore.RoundedTextField("Search audit log", 20, theme);
-        search.setPreferredSize(new Dimension(240, 42));
-        header.add(search, BorderLayout.EAST);
-        JPanel columns = new JPanel(new GridLayout(1, 2, 14, 0));
-        columns.setOpaque(false);
+        TowHitchCore.RoundedTextField search = new TowHitchCore.RoundedTextField(
+                "Search by item, action, or date...", 28, theme);
+        search.setMargin(new Insets(0, 10, 0, 8));
+        RoundedSearchPanel searchContainer = new RoundedSearchPanel();
+        searchContainer.setPreferredSize(new Dimension(350, 38));
+        searchContainer.add(buildSearchLeading(), BorderLayout.WEST);
+        searchContainer.add(search, BorderLayout.CENTER);
+        header.add(searchContainer, BorderLayout.EAST);
+        JPanel result = new JPanel(new BorderLayout());
+        result.setOpaque(false);
         Runnable refresh = () -> {
-            columns.removeAll();
-            List<HistoryRecord> products = new ArrayList<>();
-            List<HistoryRecord> materials = new ArrayList<>();
+            List<HistoryRecord> filtered = new ArrayList<>();
             String query = search.getText().trim().toLowerCase(Locale.ROOT);
             for (HistoryRecord record : readHistory()) {
+                String formattedDate = TowHitchCore.formatSmartDateOnly(record.date);
                 if (!query.isEmpty() && !record.message.toLowerCase(Locale.ROOT).contains(query)
-                        && !record.display.toLowerCase(Locale.ROOT).contains(query)) continue;
-                if (record.message.toLowerCase(Locale.ROOT).contains("produced:")
-                        || record.message.toLowerCase(Locale.ROOT).contains("approved stock request")
-                        || record.message.toLowerCase(Locale.ROOT).contains("completed customer order")) {
-                    products.add(record);
-                } else {
-                    materials.add(record);
+                        && !record.display.toLowerCase(Locale.ROOT).contains(query)
+                        && !record.date.toLowerCase(Locale.ROOT).contains(query)
+                        && !formattedDate.toLowerCase(Locale.ROOT).contains(query)) {
+                    continue;
+                }
+                boolean matchesSection = "Product Logs".equals(title)
+                        ? isProductionRecord(record.message)
+                        : "Stock Order Logs".equals(title)
+                                ? isStockOrderRecord(record.message)
+                                : isMaterialConsumptionRecord(record.message);
+                if (matchesSection) {
+                    filtered.add(record);
                 }
             }
-            columns.add(historyCard("Product & Order Logs", products));
-            columns.add(historyCard("Material Consumption & Audit", materials));
-            columns.revalidate();
-            columns.repaint();
+            result.removeAll();
+            result.add(historyCard(title, filtered), BorderLayout.CENTER);
+            result.revalidate();
+            result.repaint();
         };
         search.addActionListener(event -> refresh.run());
         refresh.run();
-        page.add(columns, BorderLayout.CENTER);
+        page.add(sectionContainer(result), BorderLayout.CENTER);
         return page;
+    }
+
+    private boolean isProductionRecord(String message) {
+        return message.startsWith("Produced:");
+    }
+
+    private boolean isStockOrderRecord(String message) {
+        String value = message.toLowerCase(Locale.ROOT);
+        return value.contains("approved stock request")
+                || value.contains("completed customer order");
+    }
+
+    private boolean isMaterialConsumptionRecord(String message) {
+        String value = message.toLowerCase(Locale.ROOT);
+        return value.startsWith("deducted:") || value.startsWith("consumed for ");
+    }
+
+    private JPanel buildTrashPage() {
+        JPanel page = pageShell("Trash",
+                "30-day recovery archive for recently deleted inventory items and records.");
+        JPanel list = new JPanel(new BorderLayout(0, 7));
+        list.setOpaque(false);
+        int[] widths = {-1, 130, 60, 130, 160, 90, 230};
+        JPanel header = tableHeader(new String[] {
+                "Item / Record", "Category", "Qty", "Deleted By", "Deleted Date", "Expires In", ""
+        }, widths);
+        JPanel rows = verticalPanel();
+        try {
+            for (TowHitchCore.TrashEntry entry : TowHitchCore.loadTrash()) {
+                rows.add(trashRow(entry, widths));
+                rows.add(Box.createVerticalStrut(7));
+            }
+        } catch (IOException e) {
+            showDataError("Unable to load trash_bin.txt", e);
+        }
+        if (rows.getComponentCount() == 0) {
+            rows.add(textLabel("Trash is empty.", 13, false, theme.secondaryText()));
+        }
+        JScrollPane data = scroll(rows);
+        alignHeaderToTableViewport(header, data);
+        list.add(header, BorderLayout.NORTH);
+        list.add(data, BorderLayout.CENTER);
+        page.add(sectionContainer(list), BorderLayout.CENTER);
+        return page;
+    }
+
+    private JPanel trashRow(TowHitchCore.TrashEntry entry, int[] widths) {
+        JPanel row = rowPanel();
+        addCell(row, tableNameCell(entry.itemName), 0, widths, SwingConstants.LEFT);
+        addCell(row, tableCell(trashCategoryLabel(entry.category)), 1, widths, SwingConstants.LEFT);
+        addCell(row, tableCell(Integer.toString(entry.quantity)), 2, widths, SwingConstants.CENTER);
+        addCell(row, tableCell(entry.deletedBy), 3, widths, SwingConstants.LEFT);
+        addCell(row, tableCell(TowHitchCore.formatSmartDate(entry.deletedAtIso)),
+                4, widths, SwingConstants.LEFT);
+        long age;
+        try {
+            age = java.time.temporal.ChronoUnit.DAYS.between(
+                    java.time.LocalDateTime.parse(entry.deletedAtIso),
+                    java.time.LocalDateTime.now());
+        } catch (RuntimeException e) {
+            age = 30;
+        }
+        long daysRemaining = Math.min(30, Math.max(0, 30 - age));
+        addCell(row, tableCell(daysRemaining + " days"), 5, widths,
+                SwingConstants.CENTER);
+        JPanel actions = new JPanel(new FlowLayout(FlowLayout.CENTER, 5, 0));
+        actions.setOpaque(false);
+        TowHitchCore.RoundedButton restore = actionButton(
+                "Restore", GREEN, new Color(0xF8FAFC));
+        TowHitchCore.RoundedButton delete = actionButton(
+                "Delete Permanently", RED, new Color(0xFAF8F5));
+        restore.addActionListener(event -> restoreTrashEntry(entry));
+        delete.addActionListener(event -> permanentlyDeleteTrashEntry(entry));
+        actions.add(restore);
+        actions.add(delete);
+        addCell(row, actions, 6, widths, SwingConstants.CENTER);
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 56));
+        return row;
+    }
+
+    private void restoreTrashEntry(TowHitchCore.TrashEntry entry) {
+        try {
+            List<TowHitchCore.InventoryItem> inventory = TowHitchCore.loadInventory();
+            String type = entry.category.equals("F") ? "F"
+                    : entry.category.equals("U") ? "U" : "R";
+            for (TowHitchCore.InventoryItem item : inventory) {
+                if (item.type.equals(type) && item.itemName.equalsIgnoreCase(entry.itemName)) {
+                    error("An item with this name already exists in inventory.");
+                    return;
+                }
+
+            }
+            inventory.add(new TowHitchCore.InventoryItem(type, entry.itemName,
+                    entry.quantity, entry.minAlert));
+            TowHitchCore.saveInventory(inventory);
+            if (!entry.extraData.isEmpty()) {
+                byte[] decoded = java.util.Base64.getDecoder().decode(entry.extraData);
+                Map<String, List<TowHitchCore.BOMItem>> bom = TowHitchCore.loadBOM();
+                String[] lines = new String(decoded, StandardCharsets.UTF_8).split("\\n");
+                if ("F".equals(type)) {
+                    List<TowHitchCore.BOMItem> recipe = new ArrayList<>();
+                    for (int i = 1; i < lines.length; i++) {
+                        String[] fields = lines[i].split("\\t", -1);
+                        if (fields.length == 2) {
+                            recipe.add(new TowHitchCore.BOMItem(fields[0],
+                                    Integer.parseInt(fields[1])));
+                        }
+                    }
+                    bom.put(entry.itemName, recipe);
+                } else if (lines.length > 0 && "RAW".equals(lines[0])) {
+                    for (int i = 1; i < lines.length; i++) {
+                        String[] fields = lines[i].split("\\t", -1);
+                        if (fields.length == 2) {
+                            bom.computeIfAbsent(fields[0], ignored -> new ArrayList<>())
+                                    .add(new TowHitchCore.BOMItem(entry.itemName,
+                                            Integer.parseInt(fields[1])));
+                        }
+                    }
+                }
+                TowHitchCore.saveBOM(bom);
+            }
+            TowHitchCore.removeFromTrash(entry.id);
+            TowHitchCore.appendHistory("Restored from Trash: " + entry.itemName
+                    + " by " + currentStaffName);
+            TowHitchCore.showToast(frame, entry.itemName + " restored", true);
+            buildApplication();
+        } catch (IOException | RuntimeException e) {
+            showDataError("Unable to restore trash item",
+                    e instanceof IOException ? (IOException) e : new IOException(e));
+        }
+    }
+
+    private void permanentlyDeleteTrashEntry(TowHitchCore.TrashEntry entry) {
+        if (JOptionPane.showConfirmDialog(frame,
+                "Permanently delete '" + entry.itemName + "'? This cannot be undone.",
+                "Delete Permanently", JOptionPane.YES_NO_OPTION,
+                JOptionPane.WARNING_MESSAGE) != JOptionPane.YES_OPTION) {
+            return;
+        }
+        try {
+            TowHitchCore.removeFromTrash(entry.id);
+            TowHitchCore.appendHistory("Permanently deleted from Trash: " + entry.itemName
+                    + " by " + currentStaffName);
+            buildApplication();
+        } catch (IOException e) {
+            showDataError("Unable to delete trash item", e);
+        }
+    }
+
+    private String trashCategoryLabel(String category) {
+        return "F".equals(category) ? "Finished Goods" : "Raw Materials";
     }
 
     private List<HistoryRecord> readHistory() {
@@ -938,6 +1731,10 @@ public class StaffApp {
                 if (space > 0) {
                     date = stamp.substring(0, space);
                     time = stamp.substring(space + 1);
+                }
+                if (message.startsWith("Deducted: ")) {
+                    result.add(new HistoryRecord(message, formatHistoryDisplay(message), date, time));
+                    continue;
                 }
                 if (message.startsWith("Consumed for ")) {
                     int separator = message.indexOf(": ");
@@ -965,11 +1762,30 @@ public class StaffApp {
     private String formatHistoryDisplay(String message) {
         if (message.startsWith("Produced: ")) {
             String produced = message.substring("Produced: ".length());
+            String producedWithActor = produced;
+            int actor = produced.lastIndexOf(" (by ");
+            if (actor >= 0 && produced.endsWith(")")) {
+                produced = produced.substring(0, actor).trim();
+            }
+            int legacyActor = produced.indexOf(") by ");
+            if (legacyActor >= 0) {
+                produced = produced.substring(0, legacyActor + 1);
+            }
+            int firstSpace = produced.indexOf(' ');
+            if (firstSpace > 0) {
+                String quantity = produced.substring(0, firstSpace);
+                if (quantity.chars().allMatch(Character::isDigit)) {
+                    return "Produced " + producedWithActor;
+                }
+            }
             int open = produced.lastIndexOf(" (");
             if (open > 0 && produced.endsWith(")")) {
                 return produced.substring(open + 2, produced.length() - 1) + " "
                         + produced.substring(0, open) + " produced";
             }
+        }
+        if (message.startsWith("Deducted: ")) {
+            return message.substring("Deducted: ".length());
         }
         if (message.startsWith("Approved stock request: ")) {
             String request = message.substring("Approved stock request: ".length());
@@ -992,20 +1808,34 @@ public class StaffApp {
 
     private JPanel historyCard(String title, List<HistoryRecord> records) {
         TowHitchCore.RoundedPanel card = new TowHitchCore.RoundedPanel(18);
-        card.setBackground(theme.panel());
+        card.setBackground(theme.isDark() ? new Color(0x1C1F26) : new Color(0xFAF8F4));
         card.setBorder(BorderFactory.createEmptyBorder(16, 16, 16, 16));
         card.setLayout(new BorderLayout(0, 10));
         card.add(textLabel(title, 16, true, theme.text()), BorderLayout.NORTH);
         JPanel rows = verticalPanel();
         for (HistoryRecord record : records) {
+            String dateLabel = TowHitchCore.formatSmartDateOnly(record.date);
+            if (rows.getComponentCount() == 0
+                    || !dateLabel.equals(rows.getClientProperty("currentHistoryDate"))) {
+                JLabel dateHeading = textLabel(dateLabel.isEmpty() ? "Unknown date" : dateLabel,
+                        13, true, theme.text());
+                dateHeading.setFont(dateHeading.getFont().deriveFont(13.5f));
+                dateHeading.setBorder(BorderFactory.createEmptyBorder(14, 0, 6, 0));
+                dateHeading.setAlignmentX(Component.LEFT_ALIGNMENT);
+                rows.add(dateHeading);
+                rows.putClientProperty("currentHistoryDate", dateLabel);
+            }
             JPanel pill = new TowHitchCore.RoundedPanel(12);
-            pill.setBackground(theme.row());
-            pill.setBorder(BorderFactory.createEmptyBorder(9, 11, 9, 11));
+            pill.setBackground(theme.isDark() ? new Color(0x252832) : Color.WHITE);
+            pill.setBorder(BorderFactory.createCompoundBorder(
+                    new TowHitchCore.RoundedBorder(theme.isDark()
+                            ? new Color(0x383C45) : new Color(0xECEAE4), 12),
+                    BorderFactory.createEmptyBorder(9, 11, 9, 11)));
             pill.setLayout(new BorderLayout(8, 0));
             JLabel message = textLabel(record.display, 12, false, theme.text());
             pill.add(message, BorderLayout.CENTER);
-            pill.add(textLabel(record.date + (record.time.isEmpty() ? "" : " | " + record.time),
-                    11, false, theme.secondaryText()), BorderLayout.EAST);
+            pill.add(textLabel(TowHitchCore.formatHistoryTime(record.time), 12, false,
+                    theme.secondaryText()), BorderLayout.EAST);
             pill.setMaximumSize(new Dimension(Integer.MAX_VALUE, 48));
             rows.add(pill);
             rows.add(Box.createVerticalStrut(6));
@@ -1031,40 +1861,69 @@ public class StaffApp {
         return page;
     }
 
-    private JPanel tableHeader(String[] labels, double[] weights) {
-        JPanel header = new JPanel(new GridBagLayout());
-        header.setBackground(theme.sidebar());
-        header.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
+    private JPanel tableHeader(String[] labels, int[] widths) {
+        JPanel header = new TowHitchCore.RoundedPanel(12);
+        header.setLayout(new GridBagLayout());
+        header.setBackground(theme.isDark() ? new Color(0x1E2026) : Color.WHITE);
+        header.setBorder(BorderFactory.createCompoundBorder(
+                new TowHitchCore.RoundedBorder(theme.isDark()
+                        ? new Color(0x383C45) : new Color(0xECEAE4), 12),
+                BorderFactory.createEmptyBorder(10, 10, 10, 10)));
         for (int i = 0; i < labels.length; i++) {
             JLabel label = tableCell(labels[i]);
             label.setFont(new Font("SansSerif", Font.BOLD, 11));
             label.setForeground(theme.secondaryText());
-            addCell(header, label, i, weights[i]);
+            addCell(header, label, i, widths, tableAlignment(i, widths));
         }
         return header;
     }
 
+    private void alignHeaderToTableViewport(JPanel header, JScrollPane scroll) {
+        scroll.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_ALWAYS);
+        int scrollbarWidth = scroll.getVerticalScrollBar().getPreferredSize().width;
+        header.setBorder(BorderFactory.createCompoundBorder(
+                new TowHitchCore.RoundedBorder(theme.isDark()
+                        ? new Color(0x383C45) : new Color(0xECEAE4), 12),
+                BorderFactory.createEmptyBorder(10, 10, 10, 10 + scrollbarWidth)));
+    }
+
     private JPanel rowPanel() {
         JPanel row = new TowHitchCore.RoundedPanel(12);
-        row.setBackground(theme.row());
+        row.setBackground(theme.isDark() ? new Color(0x252832) : Color.WHITE);
         row.setLayout(new GridBagLayout());
-        row.setBorder(BorderFactory.createEmptyBorder(7, 10, 7, 10));
+        row.setBorder(BorderFactory.createCompoundBorder(
+                new TowHitchCore.RoundedBorder(theme.isDark()
+                        ? new Color(0x383C45) : new Color(0xECEAE4), 12),
+                BorderFactory.createEmptyBorder(7, 10, 7, 10)));
         return row;
     }
 
-    private void addCell(JPanel row, Component component, int column, double weight) {
-        GridBagConstraints c = new GridBagConstraints();
-        c.gridx = column;
-        c.gridy = 0;
-        c.weightx = weight;
-        c.fill = GridBagConstraints.HORIZONTAL;
-        c.anchor = column == 0 ? GridBagConstraints.CENTER : GridBagConstraints.WEST;
-        c.insets = new Insets(0, 4, 0, 4);
-        row.add(component, c);
+    private int tableAlignment(int column, int[] widths) {
+        if (widths == REQUEST_COLUMNS && (column == 3 || column == 4)) {
+            return SwingConstants.CENTER;
+        }
+        return column == 0 || column == 2 || column == 3 || column == 5
+                || widths == UNFINISHED_COLUMNS && column == 4
+                ? SwingConstants.CENTER : SwingConstants.LEFT;
+    }
+
+    private void addCell(JPanel row, Component component, int column, int[] widths,
+                         int alignment) {
+        double[] weights = new double[widths.length];
+        for (int i = 0; i < widths.length; i++) {
+            weights[i] = widths[i] < 0 ? 1.0 : 0.0;
+        }
+        TowHitchCore.addAlignedTableCell(row, component, column, widths, weights, alignment);
     }
 
     private JLabel tableCell(String text) {
         JLabel label = textLabel(text, 12, false, theme.text());
+        label.setToolTipText(text);
+        return label;
+    }
+
+    private JLabel tableNameCell(String text) {
+        JLabel label = textLabel(text, 12, true, theme.text());
         label.setToolTipText(text);
         return label;
     }
@@ -1083,6 +1942,12 @@ public class StaffApp {
         return panel;
     }
 
+    private JPanel sectionContainer(Component content) {
+        TowHitchCore.RoundedPanel section = TowHitchCore.createSectionPanel(theme);
+        section.add(content, BorderLayout.CENTER);
+        return section;
+    }
+
     private JScrollPane scroll(Component component) {
         JScrollPane pane = new JScrollPane(component);
         pane.setBorder(BorderFactory.createEmptyBorder());
@@ -1091,6 +1956,7 @@ public class StaffApp {
         pane.getVerticalScrollBar().setUI(new TowHitchCore.MinimalScrollBarUI(theme));
         pane.getHorizontalScrollBar().setUI(new TowHitchCore.MinimalScrollBarUI(theme));
         pane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        TowHitchCore.configureSmoothScroll(pane);
         return pane;
     }
 
@@ -1110,16 +1976,50 @@ public class StaffApp {
     }
 
     private JDialog themedDialog(String title, int width, int height) {
+        return themedDialog(title, width, height, false);
+    }
+
+    private JDialog themedDialog(String title, int width, int height, boolean borderless) {
         JDialog dialog = new JDialog(frame, title, true);
+        dialog.setUndecorated(true);
+        dialog.setBackground(new Color(0, 0, 0, 0));
         dialog.setSize(width, height);
         dialog.setLocationRelativeTo(frame);
-        dialog.getContentPane().setBackground(theme.workspaceCanvas());
-        dialog.setLayout(new BorderLayout(0, 12));
-        JPanel heading = new JPanel(new BorderLayout());
+        TowHitchCore.RoundedPanel surface = new TowHitchCore.RoundedPanel(
+                borderless ? 22 : 20);
+        surface.setBackground(theme.panel());
+        surface.setBorder(BorderFactory.createCompoundBorder(
+                new TowHitchCore.RoundedBorder.RoundedShadowBorder(theme.isDark()
+                        ? new Color(0x383C45) : new Color(0xDCD8CE),
+                        borderless ? 22 : 20, !borderless),
+                BorderFactory.createEmptyBorder(8, 10, 10, 10)));
+        surface.setLayout(new BorderLayout(0, 12));
+        JPanel heading = new JPanel(new BorderLayout(8, 0));
         heading.setOpaque(false);
-        heading.setBorder(BorderFactory.createEmptyBorder(16, 18, 0, 18));
+        heading.setBorder(BorderFactory.createEmptyBorder(4, 8, 0, 8));
         heading.add(textLabel(title, 18, true, theme.text()));
-        dialog.add(heading, BorderLayout.NORTH);
+        JButton close = new JButton("\u2715");
+        close.setFocusable(false);
+        close.setContentAreaFilled(false);
+        close.setBorderPainted(false);
+        close.setForeground(theme.secondaryText());
+        close.addActionListener(event -> dialog.dispose());
+        heading.add(close, BorderLayout.EAST);
+        surface.add(heading, BorderLayout.NORTH);
+        java.awt.event.MouseAdapter drag = new java.awt.event.MouseAdapter() {
+            private java.awt.Point origin;
+            @Override public void mousePressed(java.awt.event.MouseEvent event) {
+                origin = event.getPoint();
+            }
+            @Override public void mouseDragged(java.awt.event.MouseEvent event) {
+                java.awt.Point location = dialog.getLocation();
+                dialog.setLocation(location.x + event.getX() - origin.x,
+                        location.y + event.getY() - origin.y);
+            }
+        };
+        heading.addMouseListener(drag);
+        heading.addMouseMotionListener(drag);
+        dialog.setContentPane(surface);
         return dialog;
     }
 
@@ -1132,12 +2032,15 @@ public class StaffApp {
 
     private JTextField dialogField(String value) {
         JTextField field = new JTextField(value);
+        TowHitchCore.configureTextField(field);
         field.setFont(new Font("SansSerif", Font.PLAIN, 14));
         field.setForeground(theme.text());
         field.setBackground(theme.input());
-        field.setBorder(BorderFactory.createCompoundBorder(BorderFactory.createLineBorder(theme.row()),
+        field.setBorder(BorderFactory.createCompoundBorder(
+                new TowHitchCore.RoundedBorder(theme.row(), 10),
                 BorderFactory.createEmptyBorder(8, 10, 8, 10)));
-        field.setPreferredSize(new Dimension(220, 38));
+        field.setPreferredSize(new Dimension(value != null && value.matches("\\d+")
+                ? 120 : 220, 38));
         return field;
     }
 
@@ -1200,63 +2103,421 @@ public class StaffApp {
         }
     }
 
-    private int lowStockCount() {
-        int count = 0;
-        for (TowHitchCore.InventoryItem item : safeInventory()) {
-            if (item.quantity <= item.minAlert) count++;
-        }
-        return count;
-    }
-
     private void showNotifications(Component invoker) {
         if (notificationPopup != null && notificationPopup.isVisible()) {
-            notificationPopup.setVisible(false);
+            anchoredPopover.close();
             return;
         }
-        JPopupMenu popup = new RoundedPopup();
+        javax.swing.JWindow popup = new javax.swing.JWindow(frame);
+        popup.setBackground(new Color(0, 0, 0, 0));
         JPanel content = verticalPanel();
-        JPanel heading = new JPanel(new FlowLayout(FlowLayout.LEFT, 7, 4));
+        List<TowHitchCore.SystemNotification> feed = loadNotifications();
+        JPanel heading = new JPanel(new BorderLayout(10, 0));
         heading.setOpaque(false);
-        JLabel dot = textLabel("\u25CF", 14, true, theme.danger());
-        heading.add(dot);
-        heading.add(textLabel("Low Stocks Alert", 14, true, theme.text()));
+        heading.setBorder(BorderFactory.createEmptyBorder(4, 8, 8, 8));
+        heading.add(textLabel("Notifications", 15, true, theme.text()), BorderLayout.WEST);
+        JButton markAll = notificationLink("Mark all as read");
+        heading.add(markAll, BorderLayout.EAST);
         content.add(heading);
-        int count = 0;
-        for (TowHitchCore.InventoryItem item : safeInventory()) {
-            if (item.quantity <= item.minAlert) {
-                JPanel row = new TowHitchCore.RoundedPanel(10);
-                row.setBackground(theme.row());
-                row.setBorder(BorderFactory.createEmptyBorder(7, 9, 7, 9));
-                row.setLayout(new BorderLayout(8, 0));
-                row.add(textLabel(item.itemName + " \u2022 "
-                        + ("F".equals(item.type) ? "Finished Goods" : "Unfinished Goods"),
-                        12, true, theme.text()), BorderLayout.CENTER);
-                row.add(textLabel(item.quantity + " on hand (min alert: " + item.minAlert + ")",
-                        11, true, theme.danger()), BorderLayout.EAST);
-                row.setMaximumSize(new Dimension(380, 44));
-                content.add(row);
-                content.add(Box.createVerticalStrut(4));
-                count++;
-            }
+
+        JPanel items = verticalPanel();
+        JPanel headerDivider = new JPanel();
+        headerDivider.setOpaque(true);
+        headerDivider.setBackground(theme.isDark()
+                ? new Color(0x32363F) : new Color(0xECEAE4));
+        headerDivider.setPreferredSize(new Dimension(1, 1));
+        headerDivider.setMaximumSize(new Dimension(Integer.MAX_VALUE, 1));
+        items.add(headerDivider);
+        List<JPanel> cards = new ArrayList<>();
+        List<JLabel> dots = new ArrayList<>();
+        List<JLabel> labels = new ArrayList<>();
+        for (int notificationIndex = 0; notificationIndex < feed.size(); notificationIndex++) {
+            TowHitchCore.SystemNotification notification = feed.get(notificationIndex);
+            TowHitchCore.RoundedPanel card = new TowHitchCore.RoundedPanel(12);
+            card.setLayout(new BorderLayout(9, 0));
+            card.setOpaque(true);
+            card.setBorder(BorderFactory.createCompoundBorder(
+                    new TowHitchCore.RoundedBorder(theme.isDark()
+                            ? new Color(0x32363F) : new Color(0xECEAE4), 12),
+                    BorderFactory.createEmptyBorder(10, 14, 10, 14)));
+            JLabel dot = textLabel("\u25CF", 8, true, notification.indicatorColor);
+            String notificationHtml = notification.text.startsWith("<html>")
+                    ? "<html><div style='width:340px'>"
+                            + notification.text.substring(6, notification.text.length() - 7)
+                            + "</div></html>" : notification.text;
+            JLabel label = new JLabel(notificationHtml);
+            label.setOpaque(false);
+            label.setCursor(new java.awt.Cursor(java.awt.Cursor.HAND_CURSOR));
+            label.setFont(new Font("SansSerif", Font.PLAIN, 13));
+            label.setToolTipText(notification.text);
+            card.add(dot, BorderLayout.WEST);
+            card.add(label, BorderLayout.CENTER);
+            styleNotificationCard(notification, card, dot, label);
+            card.setMaximumSize(new Dimension(Integer.MAX_VALUE, 100));
+            MouseAdapter click = new MouseAdapter() {
+                @Override
+                public void mouseClicked(MouseEvent event) {
+                    readNotificationIds.add(notificationReadKey(notification));
+                    styleNotificationCard(notification, card, dot, label);
+                    ((TowHitchCore.FlatIconButton) invoker)
+                            .setUnreadCount(notificationAlerts
+                                    ? countUnreadNotifications(feed) : 0);
+                }
+            };
+            card.addMouseListener(click);
+            dot.addMouseListener(click);
+            label.addMouseListener(click);
+            cards.add(card);
+            dots.add(dot);
+            labels.add(label);
+            items.add(Box.createVerticalStrut(4));
+            items.add(card);
+            JPanel divider = new JPanel();
+            divider.setOpaque(true);
+            divider.setBackground(theme.isDark()
+                    ? new Color(0x32363F) : new Color(0xECEAE4));
+            divider.setPreferredSize(new Dimension(1, 1));
+            divider.setMaximumSize(new Dimension(Integer.MAX_VALUE, 1));
+            items.add(divider);
         }
-        if (count == 0) content.add(textLabel("No low-stock items.", 12, false, theme.success()));
-        JScrollPane pane = scroll(content);
-        pane.setPreferredSize(new Dimension(390, Math.min(300, Math.max(70, count * 50 + 45))));
-        popup.add(pane);
+        if (feed.isEmpty()) items.add(textLabel("You're all caught up.", 13,
+                false, theme.secondaryText()));
+        markAll.addActionListener(event -> {
+            for (TowHitchCore.SystemNotification notification : feed) {
+                readNotificationIds.add(notificationReadKey(notification));
+            }
+            for (int i = 0; i < feed.size(); i++) {
+                styleNotificationCard(feed.get(i), cards.get(i), dots.get(i), labels.get(i));
+            }
+            ((TowHitchCore.FlatIconButton) invoker).setUnreadCount(0);
+        });
+        JScrollPane pane = scroll(items);
+        pane.setPreferredSize(new Dimension(420,
+                Math.min(360, Math.max(90, feed.size() * 62 + 20))));
+        content.add(pane);
+        TowHitchCore.RoundedPanel popover = new TowHitchCore.RoundedPanel(18);
+        popover.setBackground(theme.isDark() ? new Color(0x1E2026) : Color.WHITE);
+        popover.setLayout(new BorderLayout());
+        popover.setBorder(BorderFactory.createCompoundBorder(
+                new TowHitchCore.RoundedBorder.RoundedShadowBorder(theme.isDark()
+                        ? new Color(0x383C45) : new Color(0xDCD8CE), 18),
+                BorderFactory.createEmptyBorder(8, 8, 8, 8)));
+        popover.add(content, BorderLayout.CENTER);
+        popup.setContentPane(popover);
+        popup.pack();
         notificationPopup = popup;
-        popup.show(invoker, 0, invoker.getHeight());
+        anchoredPopover.show(invoker, popup, true);
+    }
+
+    private JButton notificationLink(String text) {
+        JButton button = new JButton(text);
+        button.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        button.setForeground(theme.accent());
+        button.setOpaque(false);
+        button.setContentAreaFilled(false);
+        button.setBorderPainted(false);
+        button.setFocusPainted(false);
+        button.setCursor(new java.awt.Cursor(java.awt.Cursor.HAND_CURSOR));
+        return button;
+    }
+
+    private List<TowHitchCore.SystemNotification> loadNotifications() {
+        try {
+            return TowHitchCore.loadSystemNotifications("STAFF", currentStaffName);
+        } catch (IOException e) {
+            showDataError("Unable to load system notifications", e);
+            return new ArrayList<>();
+        }
+    }
+
+    private int countUnreadNotifications(List<TowHitchCore.SystemNotification> feed) {
+        int unread = 0;
+        for (TowHitchCore.SystemNotification notification : feed) {
+            if (!readNotificationIds.contains(notificationReadKey(notification))) unread++;
+        }
+        return unread;
+    }
+
+    private int unreadNotificationCount() {
+        return countUnreadNotifications(loadNotifications());
+    }
+
+    private String notificationReadKey(TowHitchCore.SystemNotification notification) {
+        return activeUser.username + "\t" + notification.id;
+    }
+
+    private void styleNotificationCard(TowHitchCore.SystemNotification notification,
+                                       JPanel card, JLabel dot, JLabel label) {
+        boolean unread = !readNotificationIds.contains(notificationReadKey(notification));
+        card.setBackground(unread
+                ? (theme.isDark() ? new Color(0x282B33) : new Color(0xF7F5F0))
+                : (theme.isDark() ? new Color(0x1E2026) : Color.WHITE));
+        label.setFont(new Font("SansSerif", Font.PLAIN, 13));
+        label.setForeground(unread ? (theme.isDark() ? new Color(0xF9FAFB)
+                : new Color(0x111827))
+                : (theme.isDark() ? new Color(0x9CA3AF) : new Color(0x6B7280)));
+        dot.setForeground(notification.indicatorColor);
+        dot.setVisible(unread);
     }
 
     private void showSettings(Component invoker) {
-        JPopupMenu popup = new RoundedPopup();
-        JMenuItem logout = new JMenuItem("Logout");
-        logout.addActionListener(event -> {
-            activeUser = null;
-            currentPage = "Dashboard";
-            showLogin();
-        });
-        popup.add(logout);
-        popup.show(invoker, 0, invoker.getHeight());
+        showProfileMenu(invoker);
+    }
+
+    private void showProfileMenu(Component anchor) {
+        if (profilePopup != null && profilePopup.isVisible()) {
+            anchoredPopover.close();
+            return;
+        }
+        showProfilePopover(anchor, "main");
+    }
+
+    private void showProfilePopover(Component anchor, String view) {
+        if (anchoredPopover != null) anchoredPopover.close();
+        javax.swing.JWindow popup = new javax.swing.JWindow(frame);
+        popup.setBackground(new Color(0, 0, 0, 0));
+        TowHitchCore.RoundedPanel card = new TowHitchCore.RoundedPanel(18);
+        card.setBackground(theme.panel());
+        card.setLayout(new BoxLayout(card, BoxLayout.Y_AXIS));
+        card.setBorder(BorderFactory.createCompoundBorder(
+                new TowHitchCore.RoundedBorder.RoundedShadowBorder(
+                        theme.isDark() ? new Color(0x383C45) : new Color(0xDCD8CE),
+                        18, false),
+                BorderFactory.createEmptyBorder(10, 0, 10, 0)));
+        if ("account".equals(view)) {
+            card.add(profileMenuButton("\u2190 Account & Profile",
+                    () -> showProfilePopover(anchor, "main")));
+            card.add(Box.createVerticalStrut(10));
+            addProfileDetail(card, "Full Name", currentDisplayName);
+            addProfileDetail(card, "Username", "@" + activeUser.username);
+            addProfileDetail(card, "Role", "Crew");
+            addProfileDetail(card, "Branch", "Tow Hitch by 5-21");
+            card.add(profileMenuButton("Change Password", this::changePassword));
+        } else if ("settings".equals(view)) {
+            card.add(profileMenuButton("\u2190 Settings",
+                    () -> showProfilePopover(anchor, "main")));
+            card.add(Box.createVerticalStrut(10));
+            card.add(profilePreference("Notification Alerts", notificationAlerts,
+                    this::setNotificationAlerts));
+            card.add(profilePreference("Auto-Refresh Inventory", autoRefreshInventory,
+                    value -> autoRefreshInventory = value));
+            card.add(Box.createVerticalStrut(8));
+            addProfileDetail(card, "Session & Security", "Signed in securely");
+        } else if ("display".equals(view)) {
+            card.add(profileMenuButton("\u2190 Display & Accessibility",
+                    () -> showProfilePopover(anchor, "main")));
+            card.add(Box.createVerticalStrut(12));
+            JLabel title = textLabel("Dark Mode", 14, true, theme.text());
+            title.setBorder(BorderFactory.createEmptyBorder(0, 4, 8, 4));
+            card.add(title);
+            javax.swing.JRadioButton off = profileRadio("Off", !theme.isDark());
+            javax.swing.JRadioButton on = profileRadio("On", theme.isDark());
+            javax.swing.ButtonGroup group = new javax.swing.ButtonGroup();
+            group.add(off);
+            group.add(on);
+            off.addActionListener(event -> applyProfileTheme(false));
+            on.addActionListener(event -> applyProfileTheme(true));
+            card.add(off);
+            card.add(on);
+            card.add(Box.createVerticalStrut(8));
+            card.add(profilePreference("Compact View", compactView,
+                    this::setCompactView));
+        } else {
+            JPanel identity = new JPanel(new BorderLayout(10, 0));
+            identity.setOpaque(false);
+            identity.setBorder(BorderFactory.createEmptyBorder(0, 14, 12, 14));
+            identity.add(new TowHitchCore.ProfileButton(theme), BorderLayout.WEST);
+            JPanel labels = new JPanel();
+            labels.setOpaque(false);
+            labels.setLayout(new BoxLayout(labels, BoxLayout.Y_AXIS));
+            labels.add(textLabel(currentDisplayName, 13, true, theme.text()));
+            labels.add(Box.createVerticalStrut(3));
+            labels.add(textLabel("Crew \u2022 @" + activeUser.username,
+                    12, false, theme.secondaryText()));
+            identity.add(labels, BorderLayout.CENTER);
+            card.add(identity);
+            card.add(profileMenuRow("\u25C9", "Account & Profile",
+                    () -> showProfilePopover(anchor, "account")));
+            card.add(Box.createVerticalStrut(4));
+            card.add(profileMenuRow("\u2699", "Settings",
+                    () -> showProfilePopover(anchor, "settings")));
+            card.add(Box.createVerticalStrut(4));
+            card.add(profileMenuRow("\u263C", "Display & Accessibility",
+                    () -> showProfilePopover(anchor, "display")));
+            card.add(Box.createVerticalStrut(10));
+            card.add(profileDivider());
+            TowHitchCore.PopoverMenuButton logout = new TowHitchCore.PopoverMenuButton(
+                    "Logout", "\u21AA", false, true, theme);
+            logout.addActionListener(event -> logout());
+            card.add(Box.createVerticalStrut(8));
+            card.add(logout);
+        }
+        popup.setContentPane(card);
+        popup.pack();
+        profilePopup = popup;
+        anchoredPopover.show(anchor, popup, true);
+    }
+
+    private TowHitchCore.PopoverMenuButton profileMenuButton(String text, Runnable action) {
+        TowHitchCore.PopoverMenuButton button = new TowHitchCore.PopoverMenuButton(
+                text, "", false, false, theme);
+        button.addActionListener(event -> action.run());
+        return button;
+    }
+
+    private TowHitchCore.PopoverMenuButton profileMenuRow(
+            String icon, String label, Runnable action) {
+        TowHitchCore.PopoverMenuButton button = new TowHitchCore.PopoverMenuButton(
+                label, icon, true, false, theme);
+        button.addActionListener(event -> action.run());
+        return button;
+    }
+
+    private void addProfileDetail(JPanel parent, String key, String value) {
+        JPanel row = new JPanel(new BorderLayout(8, 0));
+        row.setOpaque(false);
+        row.setBorder(BorderFactory.createEmptyBorder(5, 4, 5, 4));
+        row.add(textLabel(key, 12, false, theme.secondaryText()), BorderLayout.WEST);
+        if ("Role".equals(key)) {
+            TowHitchCore.RoundedPanel badge = new TowHitchCore.RoundedPanel(10);
+            badge.setBackground(theme.isDark() ? new Color(0x34312F) : new Color(0xEDE7DD));
+            badge.setBorder(BorderFactory.createEmptyBorder(3, 9, 3, 9));
+            badge.add(textLabel(value.toUpperCase(Locale.ROOT), 10, true, theme.text()));
+            row.add(badge, BorderLayout.EAST);
+        } else {
+            row.add(textLabel(value, 12, false, theme.text()), BorderLayout.EAST);
+        }
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 30));
+        parent.add(row);
+    }
+
+    private JCheckBox profilePreference(String label, boolean selected,
+                                        java.util.function.Consumer<Boolean> update) {
+        JCheckBox preference = new JCheckBox(label, selected);
+        preference.setOpaque(false);
+        preference.setForeground(theme.text());
+        preference.setAlignmentX(Component.LEFT_ALIGNMENT);
+        preference.addActionListener(event -> update.accept(preference.isSelected()));
+        return preference;
+    }
+
+    private void setNotificationAlerts(boolean enabled) {
+        notificationAlerts = enabled;
+        if (notificationButton != null) {
+            notificationButton.setUnreadCount(enabled ? unreadNotificationCount() : 0);
+        }
+    }
+
+    private void setCompactView(boolean enabled) {
+        compactView = enabled;
+        anchoredPopover.close();
+        buildApplication();
+    }
+
+    private void changePassword() {
+        JPasswordField password = new JPasswordField();
+        int result = JOptionPane.showConfirmDialog(frame, password, "Change Password",
+                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (result != JOptionPane.OK_OPTION) return;
+        String updated = new String(password.getPassword());
+        if (updated.trim().isEmpty()) {
+            JOptionPane.showMessageDialog(frame, "Password cannot be empty.",
+                    "Change Password", JOptionPane.WARNING_MESSAGE);
+            return;
+        }
+        try {
+            List<TowHitchCore.StaffAccount> accounts = TowHitchCore.loadStaffAccounts();
+            List<TowHitchCore.StaffAccount> updatedAccounts = new ArrayList<>();
+            boolean staffAccountFound = false;
+            for (TowHitchCore.StaffAccount account : accounts) {
+                if (account.username.equalsIgnoreCase(activeUser.username)) {
+                    staffAccountFound = true;
+                    updatedAccounts.add(new TowHitchCore.StaffAccount(account.id,
+                            account.fullName, account.displayName, account.username, updated,
+                            account.status, account.createdAtIso));
+                } else {
+                    updatedAccounts.add(account);
+                }
+            }
+            if (staffAccountFound) {
+                TowHitchCore.saveStaffAccounts(updatedAccounts);
+            } else {
+                List<TowHitchCore.UserAccount> users = TowHitchCore.loadUsers();
+                boolean userAccountFound = false;
+                for (TowHitchCore.UserAccount user : users) {
+                    if (user.username.equalsIgnoreCase(activeUser.username)) {
+                        user.setPassword(updated);
+                        userAccountFound = true;
+                    }
+                }
+                if (!userAccountFound) {
+                    throw new IOException("The signed-in account could not be found.");
+                }
+                TowHitchCore.saveUsers(users);
+            }
+            activeUser.setPassword(updated);
+            JOptionPane.showMessageDialog(frame, "Password updated successfully.",
+                    "Change Password", JOptionPane.INFORMATION_MESSAGE);
+        } catch (IOException e) {
+            showDataError("Unable to update account password", e);
+        }
+    }
+
+    private JPanel profileDivider() {
+        JPanel divider = new JPanel();
+        divider.setOpaque(true);
+        divider.setBackground(theme.isDark() ? new Color(0x383C45) : new Color(0xE8E3DA));
+        divider.setPreferredSize(new Dimension(1, 1));
+        divider.setMaximumSize(new Dimension(Integer.MAX_VALUE, 1));
+        return divider;
+    }
+
+    private javax.swing.JRadioButton profileRadio(String text, boolean selected) {
+        javax.swing.JRadioButton radio = new javax.swing.JRadioButton(text, selected);
+        radio.setOpaque(false);
+        radio.setForeground(theme.text());
+        radio.setFont(new Font("SansSerif", Font.PLAIN, 13));
+        radio.setAlignmentX(Component.LEFT_ALIGNMENT);
+        radio.setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+        return radio;
+    }
+
+    private void applyProfileTheme(boolean dark) {
+        if (theme.isDark() != dark) {
+            theme.setDark(dark);
+            buildApplication();
+        }
+        if (anchoredPopover != null) anchoredPopover.close();
+    }
+
+    private void showAccountSettings() {
+        JOptionPane.showMessageDialog(frame,
+                "Display name: " + currentDisplayName + "\nUsername: " + activeUser.username
+                        + "\nRole: Crew",
+                "Settings", JOptionPane.INFORMATION_MESSAGE);
+    }
+
+    private void positionProfilePopover(javax.swing.JWindow popup, Component anchor) {
+        java.awt.Point point = anchor.getLocationOnScreen();
+        java.awt.Rectangle bounds = java.awt.GraphicsEnvironment
+                .getLocalGraphicsEnvironment().getMaximumWindowBounds();
+        int x = Math.min(point.x + anchor.getWidth() - popup.getWidth(),
+                bounds.x + bounds.width - popup.getWidth() - 8);
+        x = Math.max(bounds.x + 8, x);
+        int y = point.y + anchor.getHeight() + 6;
+        if (y + popup.getHeight() > bounds.y + bounds.height - 8) {
+            y = point.y - popup.getHeight() - 6;
+        }
+        popup.setLocation(x, y);
+    }
+
+    private void logout() {
+        activeUser = null;
+        currentStaffName = "";
+        currentDisplayName = "";
+        currentPage = "Dashboard";
+        if (anchoredPopover != null) anchoredPopover.close();
+        showLogin();
     }
 
     private void error(String message) {
@@ -1274,7 +2535,9 @@ public class StaffApp {
         private Timer timer;
 
         private ThemeSwitchButton() {
-            setPreferredSize(new Dimension(84, 40));
+            setPreferredSize(new Dimension(60, 30));
+            setMinimumSize(new Dimension(60, 30));
+            setMaximumSize(new Dimension(60, 30));
             setOpaque(false);
             setContentAreaFilled(false);
             setBorderPainted(false);
@@ -1325,20 +2588,8 @@ public class StaffApp {
         @Override
         protected void paintComponent(Graphics graphics) {
             Graphics2D g = (Graphics2D) graphics.create();
-            g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            int width = getWidth();
-            int height = getHeight();
-            g.setColor(theme.isDark() ? new Color(0x34312F) : theme.sidebar());
-            g.fillRoundRect(0, 1, width, height - 2, height - 2, height - 2);
-            int size = height - 10;
-            int x = 5 + Math.round((width - size - 10) * position);
-            g.setColor(theme.isDark() ? new Color(0x303856) : Color.WHITE);
-            g.fillOval(x, 5, size, size);
-            g.setFont(new Font("SansSerif", Font.BOLD, 18));
-            g.setColor(theme.isDark() ? new Color(0x969DAD) : new Color(0x23211F));
-            g.drawString("\u2600", position < .5f ? 11 : 11, 28);
-            g.setColor(theme.isDark() ? new Color(0xF5E9B8) : new Color(0x8B949E));
-            g.drawString("\u263E", position < .5f ? width - 25 : width - 25, 28);
+            TowHitchCore.paintThemeSwitch(g, getWidth(), getHeight(), position,
+                    theme.isDark());
             g.dispose();
         }
     }
@@ -1363,7 +2614,7 @@ public class StaffApp {
         @Override
         public void doLayout() {
             if (card != null) {
-                int width = Math.min(516, getWidth() - 32);
+                int width = Math.min(468, getWidth() - 32);
                 int height = Math.min(card.getPreferredSize().height, getHeight() - 32);
                 card.setBounds((getWidth() - width) / 2, (getHeight() - height) / 2, width, height);
             }
@@ -1389,6 +2640,10 @@ public class StaffApp {
 
     private class GlassLoginCard extends JPanel {
         private static final long serialVersionUID = 1L;
+        private GlassLoginCard() {
+            setOpaque(false);
+        }
+
         @Override protected void paintComponent(Graphics graphics) {
             Graphics2D g = (Graphics2D) graphics.create();
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
@@ -1407,10 +2662,13 @@ public class StaffApp {
 
             private LoginTextField(String placeholder) {
                 this.placeholder = placeholder;
+                TowHitchCore.configureTextField(this);
                 setFont(new Font("SansSerif", Font.PLAIN, 14));
                 setOpaque(false);
                 setBorder(BorderFactory.createEmptyBorder(0, 28, 0, 16));
-                setPreferredSize(new Dimension(394, 51));
+                setPreferredSize(new Dimension(395, 42));
+                setMinimumSize(new Dimension(395, 42));
+                setMaximumSize(new Dimension(395, 42));
             }
 
             @Override
@@ -1423,7 +2681,7 @@ public class StaffApp {
                 setForeground(new Color(0x242221));
                 setCaretColor(new Color(0x242221));
                 super.paintComponent(graphics);
-                if (getText().isEmpty() && !hasFocus()) paintPlaceholder(graphics, placeholder, this);
+                if (getText().isEmpty()) paintPlaceholder(graphics, placeholder, this);
             }
         }
 
@@ -1436,7 +2694,9 @@ public class StaffApp {
                 setFont(new Font("SansSerif", Font.PLAIN, 14));
                 setOpaque(false);
                 setBorder(BorderFactory.createEmptyBorder(0, 28, 0, 16));
-                setPreferredSize(new Dimension(394, 51));
+                setPreferredSize(new Dimension(395, 42));
+                setMinimumSize(new Dimension(395, 42));
+                setMaximumSize(new Dimension(395, 42));
             }
 
             @Override
@@ -1449,7 +2709,7 @@ public class StaffApp {
                 setForeground(new Color(0x242221));
                 setCaretColor(new Color(0x242221));
                 super.paintComponent(graphics);
-                if (getPassword().length == 0 && !hasFocus()) paintPlaceholder(graphics, placeholder, this);
+                if (getPassword().length == 0) paintPlaceholder(graphics, placeholder, this);
             }
         }
 
@@ -1480,9 +2740,9 @@ public class StaffApp {
             super.paintComponent(graphics);
             Graphics2D g = (Graphics2D) graphics.create();
             g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-            g.setColor(theme.dashboardPanel());
+            g.setColor(theme.isDark() ? new Color(0x1E2026) : Color.WHITE);
             g.fillRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 18, 18);
-            g.setColor(theme.row());
+            g.setColor(theme.isDark() ? new Color(0x32363F) : new Color(0xECEAE4));
             g.drawRoundRect(0, 0, getWidth() - 1, getHeight() - 1, 18, 18);
             g.dispose();
         }
@@ -1513,8 +2773,10 @@ public class StaffApp {
                 super.paintComponent(graphics);
                 Graphics2D g = (Graphics2D) graphics.create();
                 g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                g.setColor(theme.input());
-                g.fillRoundRect(0, 0, getWidth(), getHeight(), 12, 12);
+                g.setColor(theme.isDark() ? new Color(0x24272E) : new Color(0xFBF9F5));
+                g.fillRoundRect(1, 1, getWidth() - 3, getHeight() - 3, 12, 12);
+                g.setColor(theme.isDark() ? new Color(0x383C45) : new Color(0xE2DDD3));
+                g.drawRoundRect(1, 1, getWidth() - 3, getHeight() - 3, 12, 12);
                 g.dispose();
             }
         }
